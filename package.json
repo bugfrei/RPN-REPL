@@ -1,0 +1,15 @@
+{
+  "name": "rpn",
+  "version": "1.0.0",
+  "main": "rpn.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "infix-rpn-eval": "^1.0.0"
+  }
+}
