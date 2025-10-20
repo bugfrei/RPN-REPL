@@ -1,250 +1,189 @@
 #!/usr/bin/env python3
-import subprocess, json, os, readline, shlex, platform
+# RPN-REPL mit :p (Precompile umschalten) und :step (Step-Modus umschalten)
+# - Leere Eingabe: Bildschirm leeren + Hilfe anzeigen
+# - :step toggelt Step-Modus (übergibt --step an rpn.js)
+# - :p toggelt Precompile-Modus (übergibt --precompile an rpn.js)
+# - :? zeigt letzten POSTFIX als INFIX
+# - := X konvertiert INFIX → POSTFIX via infix-rpn-eval (Node), zeigt & führt aus
+# - :f listet Funktionen aus ~/.rpnfunc.json
+# - :fe öffnet ~/.rpnfunc.json im Editor
+# - :e / :s / :l / :r / :rl wie gehabt
+
+import os, sys, json, subprocess, readline
+from pathlib import Path
 
 HOME = os.path.expanduser("~")
-RPN_PATH = "rpn.js"                           # Pfad zu deinem Node-RPN
-SIMVARS_FILE = os.path.join(HOME, ".simvars.json")
-FUNC_FILE_JSON = os.path.join(HOME, ".rpnfunc.json")
-FUNC_FILE_JS   = os.path.join(HOME, ".rpnfunc.js")
-STACK_FILE     = os.path.join(HOME, ".rpnstack.json")
+RPN_JS = os.environ.get("RPN_JS", "rpn.js")
+SIMVARS_PATH = os.path.expanduser("~/.simvars.json")
+FUNCS_PATH   = os.path.expanduser("~/.rpnfunc.json")
+STATE_PATH   = os.path.expanduser("~/.rpn_state.json")
+STACK_PATH   = os.path.expanduser("~/.rpnstack.json")
 
-def resolve_func_path():
-    # bevorzugt .json, fällt auf .js zurück, sonst .json als Standardpfad
-    if os.path.exists(FUNC_FILE_JSON):
-        return FUNC_FILE_JSON
-    if os.path.exists(FUNC_FILE_JS):
-        return FUNC_FILE_JS
-    return FUNC_FILE_JSON
+step_mode = False
+precompile_mode = False
+last_postfix = ""   # zuletzt ausgeführter Postfix
 
-FUNC_FILE = resolve_func_path()
-
-# ---------------- Clear Screen ----------------
 def clear_screen():
-    if platform.system() == "Windows":
-        os.system("cls")
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="")
     else:
-        os.system("clear")
+        os.system("clear" if os.name != "nt" else "cls")
 
-# ---------------- Helper: SimVars I/O ----------------
-def load_simvars():
-    if os.path.exists(SIMVARS_FILE):
-        try:
-            with open(SIMVARS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[WARN] Fehler beim Laden von {SIMVARS_FILE}: {e}")
-    return {"simvars": {}}
-
-def edit_simvars():
-    editor = os.environ.get("EDITOR", "vim")
-    # Datei anlegen, falls nicht vorhanden
-    if not os.path.exists(SIMVARS_FILE):
-        try:
-            with open(SIMVARS_FILE, "w", encoding="utf-8") as f:
-                f.write('{"simvars":{}}\n')
-        except Exception as e:
-            print(f"[ERROR] Konnte {SIMVARS_FILE} nicht anlegen: {e}")
-            return
-    subprocess.run([editor, SIMVARS_FILE])
-
-def print_simvars():
-    ctx = load_simvars()
-    simvars = ctx.get("simvars", {})
-    if not simvars:
-        print("(keine SimVars vorhanden)")
-        return
-    for k, v in simvars.items():
-        print(f"{k} = {v}")
-
-# ---------------- Helper: Functions I/O ----------------
-def load_functions():
-    if not os.path.exists(FUNC_FILE):
-        return []
+def load_json(path, default):
     try:
-        with open(FUNC_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
-        print(f"[WARN] Fehler beim Laden der Funktionen aus {FUNC_FILE}: {e}")
-        return []
+    except Exception:
+        return default
 
-def list_functions():
-    funcs = load_functions()
-    if not funcs:
-        print(f"(keine Funktionen gefunden – Datei: {FUNC_FILE})")
-        return
-    print(f"Funktionen aus: {FUNC_FILE}")
-    print("-" * 60)
-    for f in funcs:
-        name   = f.get("name", "<unnamed>")
-        params = f.get("params", 0)
-        rpn    = f.get("rpn", "")
-        print(f"Name   : {name}")
-        print(f"Params : {params}")
-        print(f"RPN    : {rpn}")
-        print("-" * 60)
+def save_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
 
-def edit_functions():
-    editor = os.environ.get("EDITOR", "vim")
-    if not os.path.exists(FUNC_FILE):
-        try:
-            with open(FUNC_FILE, "w", encoding="utf-8") as f:
-                f.write("[]\n")
-        except Exception as e:
-            print(f"[ERROR] Konnte {FUNC_FILE} nicht anlegen: {e}")
-            return
-    subprocess.run([editor, FUNC_FILE])
+def open_in_vim(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.exists(path):
+        if path == SIMVARS_PATH:
+            save_json(path, {"simvars": {}})
+        elif path == FUNCS_PATH:
+            save_json(path, [])
+        else:
+            Path(path).write_text("", encoding="utf-8")
+    os.system(f'${{EDITOR:-vim}} "{path}"')
 
-# ---------------- Helper: Result-Stacks I/O ----------------
-def load_results():
-    if not os.path.exists(STACK_FILE):
-        return []
+def run_rpn(expr, pass_ctx=True):
+    global last_postfix
+    last_postfix = expr.strip()
+
+    cmd = ["node", RPN_JS, expr, "--noprompt"]
+    if step_mode:
+        cmd.append("--step")
+    if precompile_mode:
+        cmd.append("--precompile")
+
+    if pass_ctx:
+        ctx = {"simvars": load_json(SIMVARS_PATH, {}).get("simvars", {})}
+        cmd += ["--ctx", json.dumps(ctx)]
+
     try:
-        with open(STACK_FILE, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        res = obj.get("results", [])
-        if isinstance(res, list):
-            # nur Listen aus Zahlen akzeptieren
-            out = []
-            for item in res:
-                if isinstance(item, list):
-                    clean = []
-                    for v in item:
-                        try:
-                            n = float(v)
-                            clean.append(n)
-                        except Exception:
-                            pass
-                    out.append(clean)
-            return out
-    except Exception as e:
-        print(f"[WARN] Fehler beim Laden von {STACK_FILE}: {e}")
-    return []
+        proc = subprocess.Popen(cmd)
+        proc.wait()
+    except FileNotFoundError:
+        print("node oder rpn.js nicht gefunden. Stelle sicher, dass Node.js installiert ist und rpn.js im Pfad liegt.")
 
 def list_results():
-    results = load_results()
+    data = load_json(STACK_PATH, {"results": []})
+    results = data.get("results", [])
     if not results:
-        print(f"(keine gespeicherten Ergebnisse – Datei: {STACK_FILE})")
+        print("(keine gespeicherten Result-Stacks)")
         return
-    print(f"Gespeicherte Result-Stacks (neueste zuerst) aus: {STACK_FILE}")
-    print("-" * 60)
-    for i, stack in enumerate(results, start=1):
-        print(f"r{i}: " + " ".join(format_number(x) for x in stack))
-    print("-" * 60)
+    for idx, stack in enumerate(results, start=1):
+        print(f"r{idx}: {' '.join(map(str, stack))}")
 
-def format_number(x):
-    # schöne Ausgabe ohne unnötige Nachkommastellen
-    if float(x).is_integer():
-        return str(int(x))
-    return str(x)
+def list_functions():
+    funcs = load_json(FUNCS_PATH, [])
+    if not funcs:
+        print("(keine Funktionen definiert)")
+        return
+    for f in funcs:
+        name = f.get("name", "<unnamed>")
+        params = f.get("params", "?")
+        rpn = f.get("rpn", "")
+        print(f"- {name}  (params: {params})")
+        print(f"    {rpn}")
 
-# ---------------- Helper: rpn.js Aufrufe ----------------
-def run_rpn(postfix_expr, extra_args=None):
-    """Führt einen Postfix-Ausdruck über rpn.js aus; nutzt immer --ctx ~/.simvars.json und ggf. --func."""
-    ctx = load_simvars()
-    ctx_json = json.dumps(ctx)
-    cmd = ["node", RPN_PATH, postfix_expr, "--ctx", ctx_json]
-    if os.path.exists(FUNC_FILE):
-        cmd += ["--func", FUNC_FILE]
-    if extra_args:
-        cmd += list(extra_args)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            out = result.stdout.strip()
-            if out:
-                print(out)
-        else:
-            err = result.stderr.strip()
-            if err:
-                print("[ERROR]", err)
-    except FileNotFoundError:
-        print("[ERROR] node oder rpn.js nicht gefunden")
+# --- POSTFIX → INFIX (für :?) ---
+BIN_OPS = {"+","-","*","/","%","^",">","<",">=","<=","==","!=","and","or","min","max"}
+UN_OPS = {"not","round","floor","ceil","abs","sqrt","sin","cos","tan","log","exp","dnor"}
+TERN_OPS = {"clamp"}
 
-def rpn_print_vars():
-    subprocess.run(["node", RPN_PATH, "--print"])
+def tokenize(src: str):
+    out = []
+    i = 0
+    while i < len(src):
+        ch = src[i]
+        if ch.isspace():
+            i += 1; continue
+        if ch == '(':
+            depth = 1; j = i + 1
+            while j < len(src) and depth > 0:
+                if src[j] == '(':
+                    depth += 1
+                elif src[j] == ')':
+                    depth -= 1
+                j += 1
+            out.append(src[i:j]); i = j; continue
+        j = i
+        while j < len(src) and (not src[j].isspace()):
+            if src[j] in "()":
+                break
+            j += 1
+        out.append(src[i:j]); i = j
+    return [t for t in out if t]
 
-def rpn_reset_vars():
-    subprocess.run(["node", RPN_PATH, "--reset"])
-
-# ---------------- Infix <-> Postfix Utilities ----------------
-def to_postfix_with_node(infix_expr):
-    js = (
-        "const {toPostfix}=require('infix-rpn-eval');"
-        "try{"
-        "  const input=process.argv[1]||'';"
-        "  const out=toPostfix(input);"
-        "  console.log(out);"
-        "}catch(e){"
-        "  console.error('toPostfix error:', e.message);"
-        "  process.exit(1);"
-        "}"
-    )
-    try:
-        result = subprocess.run(["node", "-e", js, infix_expr], capture_output=True, text=True)
-    except FileNotFoundError:
-        print("[ERROR] Node oder Modul 'infix-rpn-eval' nicht verfügbar.")
-        return None
-    if result.returncode != 0:
-        err = result.stderr.strip()
-        if err:
-            print("[ERROR]", err)
-        return None
-    return result.stdout.strip()
-
-def rpn_to_infix(postfix_expr):
-    tokens = postfix_expr.split()
-    BIN_OPS = {"+","-","*","/","%","^",">","<",">=","<=","==","!=","and","or"}
-    UNARY_FUNCS = {"round","floor","ceil","abs","sqrt","sin","cos","tan","log","exp"}
-    UNARY_WORDS = {"not"}
+def postfix_to_infix(expr):
+    toks = tokenize(expr)
     stack = []
-    for t in tokens:
+    for t in toks:
         if t in BIN_OPS:
-            if len(stack) < 2: return "(Fehler: zu wenige Operanden)"
+            if len(stack) < 2: raise ValueError("Zu wenige Operanden für " + t)
             b = stack.pop(); a = stack.pop()
             stack.append(f"({a} {t} {b})")
-        elif t in UNARY_FUNCS:
-            if not stack: return f"(Fehler: kein Operand für {t})"
+        elif t in UN_OPS:
+            if len(stack) < 1: raise ValueError("Zu wenige Operanden für " + t)
             a = stack.pop()
-            stack.append(f"{t}({a})")
-        elif t in UNARY_WORDS:
-            if not stack: return "(Fehler: kein Operand für not)"
-            a = stack.pop()
-            stack.append(f"(not {a})")
+            stack.append(f"{t}({a})") if t != "not" else stack.append(f"(not {a})")
+        elif t in TERN_OPS:
+            if len(stack) < 3: raise ValueError("Zu wenige Operanden für clamp")
+            c = stack.pop(); b = stack.pop(); a = stack.pop()
+            stack.append(f"clamp({a}, {b}, {c})")
         else:
             stack.append(t)
-    return stack[0] if len(stack) == 1 else " ".join(stack)
+    return stack[0] if len(stack)==1 else " ".join(stack)
 
-# ---------------- Hilfe ----------------
+# --- INFIX → POSTFIX via Node 'infix-rpn-eval' ---
+def infix_to_postfix(infix_expr: str) -> str:
+    js = "const m=require('infix-rpn-eval');" \
+         "try{console.log(m.toPostfix(" + json.dumps(infix_expr) + "));}" \
+         "catch(e){console.error('ERR:'+e.message);process.exit(2);}"
+    try:
+        out = subprocess.check_output(["node", "-e", js], stderr=subprocess.STDOUT, text=True)
+        return out.strip()
+    except subprocess.CalledProcessError as e:
+        print("Fehler bei INFIX→POSTFIX:", e.output.strip())
+        return ""
+
 def print_help():
-    print("""
-Verfügbare Befehle:
-  :e     – öffnet ~/.simvars.json im Editor
-  :s     – zeigt SimVars aus der Datei an
-  :l     – zeigt gespeicherte RPN-Variablen (s0..s9)
-  :r     – setzt RPN-Variablen zurück
-  :f     – listet Custom-Funktionen (Name, Parameter, RPN)
-  :fe    – öffnet die Funktionsdatei im Editor (Standard: ~/.rpnfunc.json)
-  :rl    – listet die gespeicherten Result-Stacks (r1 … r8)
-  :?     – zeigt den letzten RPN-Ausdruck (Postfix) als Infix-Ausdruck
-  := X   – wandelt den INFIX-Ausdruck X in Postfix um, zeigt ihn an und führt ihn aus
-  :q     – beendet die REPL
+    print("Verfügbare Befehle:")
+    print("  :e     – öffnet ~/.simvars.json im Editor")
+    print("  :s     – zeigt SimVars aus der Datei an")
+    print("  :l     – zeigt gespeicherte RPN-Variablen (s0..s9)")
+    print("  :r     – setzt RPN-Variablen zurück")
+    print("  :f     – listet Custom-Funktionen (Name, Parameter, RPN)")
+    print("  :fe    – öffnet die Funktionsdatei im Editor (Standard: ~/.rpnfunc.json)")
+    print("  :rl    – listet die gespeicherten Result-Stacks (r1 … r8)")
+    print("  :?     – zeigt den letzten RPN-Ausdruck (Postfix) als Infix-Ausdruck")
+    print("  := X   – wandelt den INFIX-Ausdruck X in Postfix um, zeigt ihn an und führt ihn aus")
+    print("  :step  – Step-Modus umschalten (wirkt als --step für rpn.js)")
+    print("  :p     – Precompile-Modus umschalten (wirkt als --precompile für rpn.js)")
+    print("  :q     – beendet die REPL")
+    print("")
+    print("Weitere Eingaben:")
+    print("  <POSTFIX> – führt den Postfix-Ausdruck direkt über rpn.js aus")
+    print("  (leer)    – löscht den Bildschirm und zeigt diese Hilfe")
+    print("")
+    print(f"SimVars-Datei:     {SIMVARS_PATH}")
+    print(f"Funktionen-Datei:  {FUNCS_PATH}")
+    print(f"Result-Stack-Datei:{STACK_PATH}")
 
-Weitere Eingaben:
-  <POSTFIX> – führt den Postfix-Ausdruck direkt über rpn.js aus
-  (leer)    – löscht den Bildschirm und zeigt diese Hilfe
-""".strip())
-
-# ---------------- REPL ----------------
-def repl():
-    clear_screen()  # Bildschirm sofort leeren beim Start
-
-    print("RPN REPL gestartet – einfach RPN (Postfix) oder := <Infix> eingeben")
+def start_banner():
+    clear_screen()
     print_help()
-    print(f"\nSimVars-Datei:     {SIMVARS_FILE}")
-    print(f"Funktionen-Datei:  {FUNC_FILE}")
-    print(f"Result-Stack-Datei:{STACK_FILE}\n")
 
-    last_postfix = None
+def main():
+    start_banner()
+    global step_mode, precompile_mode, last_postfix
 
     while True:
         try:
@@ -253,54 +192,78 @@ def repl():
             print()
             break
 
-        # leere Eingabe → Clear + Hilfe
         if not line:
-            clear_screen()
-            print_help()
+            start_banner()
             continue
 
-        # Commands
-        if line in (":q", "quit", "exit"):
-            break
-        if line == ":e":
-            edit_simvars(); continue
-        if line == ":s":
-            print_simvars(); continue
-        if line == ":l":
-            rpn_print_vars(); continue
-        if line == ":r":
-            rpn_reset_vars(); continue
-        if line == ":f":
-            list_functions(); continue
-        if line == ":fe":
-            edit_functions(); continue
-        if line == ":rl":
-            list_results(); continue
-        if line == ":?":
-            if not last_postfix:
-                print("(kein letzter RPN/Postfix-Ausdruck vorhanden)")
+        if line.startswith(":"):
+            parts = line.split(maxsplit=1)
+            cmd = parts[0]
+            arg = parts[1] if len(parts) > 1 else ""
+
+            if cmd == ":e":
+                open_in_vim(SIMVARS_PATH)
+
+            elif cmd == ":fe":
+                open_in_vim(FUNCS_PATH)
+
+            elif cmd == ":s":
+                print(json.dumps(load_json(SIMVARS_PATH, {}), indent=2, ensure_ascii=False))
+
+            elif cmd == ":l":
+                try:
+                    subprocess.run(["node", RPN_JS, "--print"], check=False)
+                except FileNotFoundError:
+                    print("node oder rpn.js nicht gefunden.")
+
+            elif cmd == ":r":
+                try:
+                    subprocess.run(["node", RPN_JS, "--reset"], check=False)
+                except FileNotFoundError:
+                    print("node oder rpn.js nicht gefunden.")
+
+            elif cmd == ":rl":
+                list_results()
+
+            elif cmd == ":f":
+                list_functions()
+
+            elif cmd == ":?":
+                if not last_postfix:
+                    print("(kein zuletzt ausgeführter Postfix-Ausdruck)")
+                else:
+                    try:
+                        infix = postfix_to_infix(last_postfix)
+                        print(infix)
+                    except Exception as e:
+                        print("Fehler bei POSTFIX→INFIX:", e)
+
+            elif cmd == ":=":
+                if not arg:
+                    print("Verwendung: := <INFIX-AUSDRUCK>")
+                else:
+                    pf = infix_to_postfix(arg)
+                    if pf:
+                        print(f"Als Postfix: {pf}")
+                        run_rpn(pf, pass_ctx=True)
+
+            elif cmd == ":step":
+                step_mode = not step_mode
+                print(f"Step-Modus ist jetzt {'AN' if step_mode else 'AUS'}.")
+
+            elif cmd == ":p":
+                precompile_mode = not precompile_mode
+                print(f"Precompile-Modus ist jetzt {'AN' if precompile_mode else 'AUS'}.")
+
+            elif cmd in (":q", ":quit", ":exit"):
+                break
+
             else:
-                infix = rpn_to_infix(last_postfix)
-                print(infix)
+                print("Unbekannter Befehl.")
             continue
 
-        # := <INFIX>  => mit toPostfix umwandeln, Postfix anzeigen, ausführen
-        if line.startswith(":="):
-            infix_expr = line[2:].strip()
-            if not infix_expr:
-                print("Verwendung: := <INFIX-AUSDRUCK>")
-                continue
-            postfix = to_postfix_with_node(infix_expr)
-            if postfix is None:
-                continue
-            print(f"Als Postfix: {postfix}")
-            last_postfix = postfix
-            run_rpn(postfix)
-            continue
-
-        # ansonsten: POSTFIX ausführen
-        last_postfix = line
-        run_rpn(line)
+        # sonst: direkter Postfix-Ausdruck
+        run_rpn(line, pass_ctx=True)
 
 if __name__ == "__main__":
-    repl()
+    main()
