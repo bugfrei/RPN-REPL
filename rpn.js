@@ -9,19 +9,32 @@
  * - Functions:        default = operator-like (pop args, run body as sub-postfix recursively, push result);
  *                     --precompile replaces function tokens upfront with body **without pN** (recursive)
  * - History recall:   r / rN[,k] (last stacks, up to 8)
- * - Step mode:        --step/-s prints full postfix once, then per-reduction (RED = current postfix, YELLOW = op)
+ * - Step mode:        --step/-s prints reductions; inline highlighting of reducible segment
+ * - New options:      --nocolor/-c (no ANSI colors), --mark/-m (marker style), --endstep (also prints postfix after each step and highlights the new result token)
  * - Prompts:          p1..pN get prompted unless provided via --ctx; --noprompt hides labels only
  *
- * Short flags: -s == --step, -p == --precompile, -? == --help
+ * Short flags: -s == --step, -p == --precompile, -? == --help, -c == --nocolor, -m == --mark
  */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const readline = require('readline');
 
-const COLOR_RESET   = '\x1b[0m';
-const COLOR_RED     = '\x1b[31m';
-const COLOR_YELLOW  = '\x1b[33m';
+/* ---------- ANSI colors (configurable) ---------- */
+const ANSI = {
+  reset: '\x1b[0m',
+  red: '\x1b[31m',
+  yellow: '\x1b[33m',
+  markOn: '\x1b[43m\x1b[30m', // bg yellow, fg black
+  markOff: '\x1b[0m',
+};
+function applyNoColor() {
+  ANSI.reset = '';
+  ANSI.red = '';
+  ANSI.yellow = '';
+  ANSI.markOn = '';
+  ANSI.markOff = '';
+}
 
 /* ---------- persistence helpers ---------- */
 function resolveArgPath(argv, flag, env, defName) {
@@ -132,32 +145,27 @@ function evaluateRPN(src, options = {}) {
     }
 
     // persistent vars
-    if (/^s\d+$/.test(t))  { const n=parseInt(t.slice(1),10); const val=pop(); vars[n] = toNum(val); /* no token emission */ return idx+1; }
+    if (/^s\d+$/.test(t))  { const n=parseInt(t.slice(1),10); const val=pop(); vars[n] = toNum(val); return idx+1; }
     if (/^l\d+$/.test(t))  { const n=parseInt(t.slice(1),10); const val = vars[n] ?? 0; pushValue(val, fmt(val)); return idx+1; }
 
     // temp regs (session)
-    if (/^sp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const valTop = stack.length?stack[stack.length-1]:0; regs[n]=toNum(valTop); /* no token emission */ return idx+1; }
+    if (/^sp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const valTop = stack.length?stack[stack.length-1]:0; regs[n]=toNum(valTop); return idx+1; }
     if (/^lp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const val = regs[n] ?? 0; pushValue(val, fmt(val)); return idx+1; }
 
     // SimVars
     if (t.startsWith('(A:') && t.endsWith(')')) { const key=t.slice(3,-1).trim(); const val=simvars[key]??0; pushValue(val, fmt(val)); return idx+1; }
-    if (t.startsWith('(>A:') && t.endsWith(')')){ const key=t.slice(4,-1).trim(); const val=pop(); simvars[key]=toNum(val); simvarsDirty=true; /* no token emission */ return idx+1; }
+    if (t.startsWith('(>A:') && t.endsWith(')')){ const key=t.slice(4,-1).trim(); const val=pop(); simvars[key]=toNum(val); simvarsDirty=true; return idx+1; }
 
     // custom function as operator
     const func = fnMap.get(t);
     if (func) {
       if (stack.length < func.params) throw new Error(`function '${func.name}' benötigt ${func.params} Parameter`);
-      // collect args p1..pN (preserve left-to-right order)
       const ps = Array(func.params);
       for (let k = func.params-1; k >= 0; k--) ps[k] = stack.pop();
-      // build sub-postfix with substitution
       const bodyToks = tokenize(func.rpn).map(tok => /^p(\d+)$/.test(tok) ? fmt(ps[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
       const subExpr = bodyToks.join(' ');
-      // evaluate recursively (re-using same env)
       const sub = evaluateRPN(subExpr, { vars, simvars, functions, results });
-      // In default mode: keep the FUNCTION TOKEN in expanded postfix (so steps show "X add90 = Y")
-      expandedTokens.push(t);
-      // push resulting values to current stack
+      expandedTokens.push(t); // keep function token for step-view
       sub.stack.forEach(v => stack.push(v));
       return idx+1;
     }
@@ -200,7 +208,7 @@ function evaluateRPN(src, options = {}) {
 
       case 'dnor':{ const a=pop(); const x=toNum(a); pushValue(((x % 360) + 360) % 360); expandedTokens.push('dnor'); break; }
 
-      case 'Boolean': case 'Number': case ',': /* ignore in postfix */ return idx + 1;
+      case 'Boolean': case 'Number': case ',': return idx + 1;
 
       default: throw new Error('Unknown token: ' + t);
     }
@@ -211,7 +219,7 @@ function evaluateRPN(src, options = {}) {
   return { stack, regs, vars, simvars, expandedTokens, simvarsDirty, functions };
 }
 
-/* ---------- step-by-step (supports functions as operators) ---------- */
+/* ---------- step-by-step (inline highlight of reducible segment) ---------- */
 function stepVerbose(expandedTokens, context = {}){
   let toks = expandedTokens.slice();
   const vars = context.vars || Array(10).fill(0);
@@ -219,6 +227,12 @@ function stepVerbose(expandedTokens, context = {}){
   const simvars = context.simvars || {};
   const functions = context.functions || [];
   const fnMap = new Map(functions.map(f => [f.name, f]));
+
+  const noColor = !!context.noColor;
+  const marker = !!context.marker;
+  const endStep = !!context.endStep;
+
+  if (noColor) applyNoColor();
 
   const isNum = (t)=>/^[-+]?\d+(?:[.,]\d+)?$/.test(String(t));
 
@@ -281,37 +295,105 @@ function stepVerbose(expandedTokens, context = {}){
     }
   }
 
+  function colorize(text, style) {
+    if (noColor) return text;
+    if (style === 'Y') return ANSI.yellow + text + ANSI.reset;
+    if (style === 'R') return ANSI.red + text + ANSI.reset;
+    if (style === 'M') return ANSI.markOn + text + ANSI.markOff;
+    return text;
+  }
+  function highlightRange(tokens, start, end, styleMid) {
+    const prefix = tokens.slice(0, start).join(' ');
+    const mid = tokens.slice(start, end + 1).join(' ');
+    const suffix = tokens.slice(end + 1).join(' ');
+    let out = '';
+    if (prefix) out += colorize(prefix, 'R') + (mid ? ' ' : '');
+    if (mid) out += colorize(mid, styleMid);
+    if (suffix) out += (mid ? ' ' : '') + colorize(suffix, 'R');
+    return out;
+  }
+  function highlightSingleToken(tokens, idx, style) {
+    const prefix = tokens.slice(0, idx).join(' ');
+    const tok = tokens[idx];
+    const suffix = tokens.slice(idx + 1).join(' ');
+    let out = '';
+    if (prefix) out += prefix + ' ';
+    out += colorize(tok, style);
+    if (suffix) out += ' ' + suffix;
+    return out;
+  }
+
+  // full postfix once (plain)
   console.log(toks.join(' '));
 
   let step = 1;
   while (true){
-    console.log(`Schritt ${step}: ${COLOR_RED}${toks.join(' ')}${COLOR_RESET}`);
     const segStack = [];
     let reduced = false;
+    let highlightStart = -1;
+    let highlightEnd = -1;
+    let opIndex = -1;
+    let argsForLog = [];
+    let numsForApply = [];
+    let chosenOp = null;
+
+    // find next reducible segment
     for (let i=0;i<toks.length;i++){
       const t = toks[i];
-      if (tokenIsValue(t)){ segStack.push({start:i,end:i,val:tokenValue(t),text:String(t)}); continue; }
+      if (tokenIsValue(t)){
+        segStack.push({start:i,end:i,val:tokenValue(t),text:String(t)});
+        continue;
+      }
       const k = arity(t); if (k===0) continue;
       if (segStack.length >= k){
         const args = segStack.splice(segStack.length-k, k);
-        const nums = args.map(a=>a.val);
-        let res;
-        const f = fnMap.get(t);
-        if (f){
-          const subToks = tokenize(f.rpn).map(tok => /^p(\d+)$/.test(tok) ? String(nums[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
-          const subExpr = subToks.join(' ');
-          const sub = evaluateRPN(subExpr, { vars: vars.slice(), simvars: {...simvars}, functions: functions, results: [] });
-          res = sub.stack.length ? sub.stack[sub.stack.length-1] : 0;
-        } else {
-          res = apply(t, nums);
-        }
-        const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
-        console.log(`${COLOR_YELLOW}${args.map(a=>a.text).join(' ')} ${t} = ${resStr}${COLOR_RESET}`);
-        const newToks=[]; newToks.push(...toks.slice(0,args[0].start)); newToks.push(resStr); newToks.push(...toks.slice(i+1)); toks=newToks;
-        reduced = true; break;
+        argsForLog = args;
+        numsForApply = args.map(a=>a.val);
+        highlightStart = args[0].start;
+        highlightEnd = i; // include operator
+        opIndex = i;
+        chosenOp = t;
+        break;
       }
     }
-    if (!reduced) break;
+
+    if (highlightStart === -1){
+      // nothing reducible
+      break;
+    }
+
+    // Step header with inline highlight
+    const styleMid = marker ? 'M' : 'Y';
+    console.log(`Schritt ${step}: ${highlightRange(toks, highlightStart, highlightEnd, styleMid)}`);
+
+    // compute result
+    let res;
+    const f = fnMap.get(chosenOp);
+    if (f){
+      const subToks = tokenize(f.rpn).map(tok => /^p(\d+)$/.test(tok) ? String(numsForApply[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
+      const subExpr = subToks.join(' ');
+      const sub = evaluateRPN(subExpr, { vars: vars.slice(), simvars: {...simvars}, functions: Array.from(fnMap.values()), results: [] });
+      res = sub.stack.length ? sub.stack[sub.stack.length-1] : 0;
+    } else {
+      res = apply(chosenOp, numsForApply);
+    }
+    const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
+    console.log(colorize(`${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}`, 'Y'));
+
+    // replace args...op with result
+    const newToks=[];
+    newToks.push(...toks.slice(0, highlightStart));
+    newToks.push(resStr);
+    newToks.push(...toks.slice(opIndex+1));
+    toks = newToks;
+
+    if (endStep) {
+      // show "Schritt X Ende:" with the newly inserted result highlighted
+      const resultIndex = highlightStart; // where we inserted res
+      const style = marker ? 'M' : 'Y';
+      console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
+    }
+
     step++;
     if (toks.length===1) break;
   }
@@ -348,6 +430,10 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
   const doPre  = argv.includes('--precompile') || argv.includes('-p');
   const noPrompt = argv.includes('--noprompt');
 
+  const noColor = argv.includes('--nocolor') || argv.includes('-c') || argv.includes('-n'); // support -n from older note
+  const marker = argv.includes('--mark') || argv.includes('-m');
+  const endStep = argv.includes('--endstep');
+
   const statePath = resolveArgPath(argv, 'state', 'RPN_STATE', '.rpn_state.json');
   const simPath   = resolveArgPath(argv, 'sim',   'RPN_SIMVARS', '.simvars.json');
   const funcPath  = resolveArgPath(argv, 'func',  'RPN_FUNCS', '.rpnfunc.json');
@@ -369,23 +455,25 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
   node rpn.js "<expr>" [options]
 
 Options:
-  --step, -s         Step-Modus (farbige Reduktionen)
-  --precompile, -p   Funktionsnamen im Postfix vorab expandieren (pN entfernt)
-  --noprompt         pN-Prompt-Labels unterdrücken (Eingaben bleiben erforderlich)
-  --state FILE       Pfad zu persistenten Variablen (s0..s9)
-  --sim FILE         Pfad zu SimVars (A:... / (>A:...))
-  --func FILE        Pfad zu Funktions-Definitionen (Array von {name,params,rpn})
-  --stack FILE       Pfad zur Result-History (r1..r8)
-  --ctx JSON         Inline-Kontext (z.B. SimVars, Params)
-  --print            Persistente Variablen ausgeben
-  --reset            Persistente Variablen zurücksetzen
-  --help, -?         Diese Hilfe
+  --step, -s         Step mode (inline highlight)
+  --precompile, -p   Expand functions upfront (remove pN)
+  --nocolor, -c      Disable ANSI colors (also accepts -n)
+  --mark, -m         Use yellow background (marker style) for highlights
+  --endstep          Also print postfix after each step and highlight the new result token
+  --noprompt         Hide pN prompt labels (input still required)
+  --state FILE       Persistent vars (s0..s9)
+  --sim FILE         SimVars file (A:... / (>A:...))
+  --func FILE        Functions file (array of {name,params,rpn})
+  --stack FILE       Result history file (r1..r8)
+  --ctx JSON         Inline context (e.g., simvars, params)
+  --print            Print persistent vars
+  --reset            Reset persistent vars
+  --help, -?         This help
 
-Beispiele:
-  node rpn.js "5 s0 l0" 
-  node rpn.js "5 sp0 lp0"
-  node rpn.js "0 add90 add90 add90" -s
-  node rpn.js "0 add90 add90 add90" -s -p
+Examples:
+  node rpn.js "1 2 3 4 + + +" --step --endstep
+  node rpn.js "1 2 3 4 + * +" -s -m
+  node rpn.js "0 add90 add90 add90" -s -p -c
 `);
     if (!hasExpr) return;
   }
@@ -424,8 +512,9 @@ Beispiele:
         saveResults(stackPath, newHistory);
       }
 
-      if (doStep) {
-        stepVerbose(expandedTokens, { vars: outVars, regs, simvars: outSimvars, functions: outFunctions });
+      const doStepEffective = (endStep || doStep);
+      if (doStepEffective) {
+        stepVerbose(expandedTokens, { vars: outVars, regs, simvars: outSimvars, functions: outFunctions, noColor, marker, endStep });
       } else {
         console.log(stack.join(' '));
       }
