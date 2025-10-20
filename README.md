@@ -1,224 +1,303 @@
-# 🧮 RPN Calculator + REPL
+# RPN Calculator & REPL
 
-A complete Reverse Polish Notation (RPN) calculator implemented in **Node.js** with a **Python-based REPL** shell.
-
-It supports **persistent variables**, **temporary registers**, **functions**, **SimVars**, **history stacks**, and **step-by-step** or **precompile** evaluation modes.  
-All features are accessible both from CLI and REPL.
+A powerful Reverse Polish Notation (RPN) calculator with persistent variables, local registers, SimVars, custom functions, step-by-step visualization, and a full-featured REPL environment.
 
 ---
 
-## 🇩🇪 Übersicht (German)
+## 🇩🇪 Deutsch
 
-### 🔧 Komponenten
-- `rpn.js` – der eigentliche RPN-Interpreter (Node.js)
-- `rpn_repl.py` – interaktive Shell (Python REPL)
+### Übersicht
 
-Beide arbeiten zusammen:
-- Der REPL ruft intern `rpn.js` mit passenden Parametern auf.
-- Zustand, Variablen und Ergebnisse werden als JSON-Dateien im Home-Verzeichnis gespeichert.
+Dieses Projekt besteht aus zwei Hauptkomponenten:
 
-### 📂 Standard-Dateien
-| Datei | Zweck | Beispielpfad |
-|--------|--------|--------------|
-| `~/.rpn_state.json` | persistente Variablen (s0..s9) | `{"vars": [5, 0, 0, ...]}` |
-| `~/.simvars.json` | Simulation-Variablen (A:NAME) | `{"simvars": {"ALT,ft": 1000}}` |
-| `~/.rpnfunc.json` | Funktionsdefinitionen | `[{"name": "add90", "params": 1, "rpn": "p1 90 +"}]` |
-| `~/.rpnstack.json` | Ergebnisse (r1..r8) | `{"results": [[5,10,15], [3,4]]}` |
+- **`rpn.js`** – Der eigentliche RPN-Interpreter (Node.js)
+- **`rpn_repl.py`** – Ein komfortabler interaktiver REPL für `rpn.js` (Python)
+
+Mit beiden Komponenten lassen sich komplexe Postfix-Ausdrücke, Variablen, Funktionen und Simulationen ausführen, debuggen und schrittweise nachvollziehen.
 
 ---
 
-### ▶️ Beispielaufrufe
-
-#### Direkt über CLI
-```bash
-node rpn.js "5 s0 l0"
-# Ausgabe: 5
-
-node rpn.js "5 sp0 lp0"
-# Ausgabe: 5
-```
-
-#### Mit Funktionen
-```json
-# ~/.rpnfunc.json
-[
-  { "name": "add90", "params": 1, "rpn": "p1 90 +" }
-]
-```
+### Installation
 
 ```bash
-node rpn.js "0 add90 add90 add90"
-# Ergebnis: 270
-```
+# Node.js erforderlich (>=18)
+npm install -g infix-rpn-eval
 
-#### Mit Step-Modus
-```bash
-node rpn.js "0 add90 add90 add90" -s
-```
-
-#### Mit Precompile-Modus
-```bash
-node rpn.js "0 add90 add90 add90" -p
-```
-
-#### Mit Parametern via --ctx
-```bash
-node rpn.js "p1 p2 addmul" --ctx '{"params": {"p1": 10, "p2": 5}}'
-# ~/.rpnfunc.json enthält:
-# [{"name":"addmul","params":2,"rpn":"p1 p2 + 2 *"}]
-# => Ergebnis: 30
-```
-
-#### Mit SimVars
-```bash
-node rpn.js "(A:ALT,ft) 10 + (>A:ALT,ft)" \
-  --ctx '{"simvars": {"ALT,ft": 1000}}' --noprompt
-# ALT wird zu 1010
+# Dateien ausführbar machen (optional)
+chmod +x rpn.js
+chmod +x rpn_repl.py
 ```
 
 ---
 
-### ⚙️ REPL-Befehle (Python)
-Starte:
+### Dateien & Speicherorte
+
+| Datei | Zweck | Speicherort |
+|-------|--------|--------------|
+| `~/.rpn_state.json` | Persistente Variablen `s0..s9` | automatisch angelegt |
+| `~/.simvars.json` | SimVars `(A:NAME,Unit)` | automatisch angelegt |
+| `~/.rpnfunc.json` | Benutzerdefinierte Funktionen | automatisch angelegt |
+| `~/.rpnstack.json` | Ergebnis-Historie (r1..r8) | automatisch angelegt |
+
+---
+
+### Grundprinzip
+
+Der Rechner arbeitet **stackbasiert**:  
+Operanden werden auf den Stack gelegt, Operatoren verarbeiten die obersten Werte.
+
 ```bash
-python3 rpn_repl.py
+node rpn.js "1 2 3 + *"
+# -> (1 * (2 + 3)) = 5
 ```
 
-#### Wichtige Befehle
+---
+
+### Optionen (`rpn.js`)
+
+| Option | Kurzform | Beschreibung |
+|---------|-----------|---------------|
+| `--step` | `-s` | Schritt-für-Schritt-Modus |
+| `--endstep` | – | Zeigt nach jedem Schritt den neuen Postfix mit markiertem Ergebnis |
+| `--mark` | `-m` | Gelber Hintergrund (Textmarker) statt gelber Schrift |
+| `--nocolor` | `-c` / `-n` | Deaktiviert alle Farben |
+| `--precompile` | `-p` | Ersetzt Funktionsnamen vorab durch deren Körper (ohne Parameter `pN`) |
+| `--noprompt` | – | Unterdrückt Eingabeaufforderungen für `p1..pN` |
+| `--ctx` | – | Übergibt Parameter & SimVars als JSON |
+| `--state` | – | Pfad zu persistenten Variablen |
+| `--sim` | – | Pfad zu SimVars |
+| `--func` | – | Pfad zu Funktionsdatei |
+| `--stack` | – | Pfad zur History-Datei |
+| `--help` | `-?` | Hilfe anzeigen |
+
+---
+
+### REPL-Befehle (`rpn_repl.py`)
+
 | Befehl | Beschreibung |
-|--------|---------------|
-| (leer) | Bildschirm löschen + Hilfe anzeigen |
-| `:e` | öffnet `~/.simvars.json` im Editor |
-| `:fe` | öffnet `~/.rpnfunc.json` im Editor |
-| `:s` | zeigt SimVars an |
-| `:l` | zeigt gespeicherte Variablen (s0..s9) |
-| `:r` | setzt Variablen zurück |
-| `:f` | listet Funktionen auf |
-| `:rl` | zeigt gespeicherte Result-Stacks |
-| `:?` | zeigt letzten Postfix als Infix |
-| `:= X` | konvertiert Infix → Postfix und führt aus |
-| `:step` | Step-Modus an/aus |
-| `:p` | Precompile-Modus an/aus |
-| `:q` | beendet die REPL |
+|---------|---------------|
+| `:p` | Precompile-Modus umschalten |
+| `:step` | Step-Modus umschalten |
+| `:color` | No-Color umschalten |
+| `:mark` | Marker-Stil umschalten |
+| `:end` | Endstep-Modus umschalten (impliziert Step) |
+| `:s` | SimVars anzeigen |
+| `:e` | SimVars-Datei im Editor öffnen |
+| `:fe` | Funktionsdatei im Editor öffnen |
+| `:l` | Persistente Variablen anzeigen |
+| `:r` | Persistente Variablen zurücksetzen |
+| `:rl` | Ergebnis-Stacks anzeigen |
+| `:f` | Funktionen auflisten |
+| `:?` | Letzten Postfix-Ausdruck als Infix anzeigen |
+| `:= <Infix>` | Infix-Ausdruck auswerten |
+| `:q` | Beenden |
 
 ---
 
-### 💾 Speicherbereiche
-| Typ | Kürzel | Verhalten |
-|------|--------|------------|
-| **Persistente Variablen** | `s0..s9` / `l0..l9` | `sN` speichert Stack-Top (POP), `lN` lädt |
-| **Temporäre Register** | `sp0..sp9` / `lp0..lp9` | `spN` speichert Stack-Top (ohne POP), `lpN` lädt |
-| **SimVars** | `(A:NAME,Unit)` / `(>A:NAME,Unit)` | Werte aus/zu `~/.simvars.json` |
-| **Result-History** | `r1..r8` / `rN,k` | lädt vorherige Stack-Ergebnisse |
-| **Parameter** | `p1..pN` | Werte via `--ctx` oder Prompt |
+### Persistente Variablen und Register
 
----
+| Befehl | Wirkung |
+|---------|----------|
+| `5 s0` | speichert 5 in `s0` (persistent) |
+| `l0` | lädt den Wert aus `s0` auf den Stack |
+| `5 sp0` | speichert 5 temporär in `sp0` (session-only) |
+| `lp0` | lädt den Wert aus `sp0` |
 
-### 📘 Beispiel: Infix zu Postfix
-Im REPL:
-```text
-:= (3 + 4) * 2
-```
-Ergebnis:
-```text
-Als Postfix: 3 4 + 2 *
-14
-```
-
----
-
-## 🇬🇧 Overview (English)
-
-### 🔧 Components
-- `rpn.js` – main RPN evaluator (Node.js)
-- `rpn_repl.py` – interactive REPL shell (Python)
-
-Both work together:
-- REPL invokes `rpn.js` with parameters
-- State and variables are persisted as JSON files
-
-### 📂 Default Files
-| File | Purpose | Example |
-|------|----------|----------|
-| `~/.rpn_state.json` | persistent vars s0..s9 | `{"vars":[5,0,0,...]}` |
-| `~/.simvars.json` | simulation vars (A:...) | `{"simvars":{"ALT,ft":1000}}` |
-| `~/.rpnfunc.json` | function definitions | `[{"name":"add90","params":1,"rpn":"p1 90 +"}]` |
-| `~/.rpnstack.json` | result stacks r1..r8 | `{"results":[[5,10,15],[3,4]]}` |
-
-### ▶️ Examples
-
-#### Direct CLI
 ```bash
-node rpn.js "5 s0 l0"
-# => 5
-
-node rpn.js "5 sp0 lp0"
-# => 5
+5 s0
+l0      # ergibt 5
+5 sp0
+lp0     # ergibt 5
 ```
 
-#### With functions
+---
+
+### Parameter (Postfix-Kontext, nicht Funktionsparameter!)
+
+Parameter wie `p1`, `p2` können direkt im Postfix gesetzt werden, entweder durch Eingabe oder über `--ctx`:
+
+```bash
+node rpn.js "p1 p2 +" --ctx '{"params":{"p1":10,"p2":20}}'
+# -> 30
+```
+
+> ⚠️ Diese `pN`-Parameter gelten **nur für den Postfix selbst**, nicht für Funktionen (`f.rpn`), da Funktionsparameter intern rekursiv ersetzt werden.
+
+---
+
+### SimVars
+
+SimVars simulieren externe Werte und können wie Variablen verwendet werden:
+
+```bash
+(>A:TEMP,C)    # schreibt in SimVar TEMP (Unit C)
+(A:TEMP,C)     # liest TEMP
+```
+
+Beispiel:
+```bash
+20 (>A:TEMP,C)
+(A:TEMP,C)
+# -> 20
+```
+
+In der Datei `~/.simvars.json` werden sie automatisch gespeichert:
+
 ```json
-# ~/.rpnfunc.json
+{
+  "simvars": {
+    "TEMP,C": 20
+  }
+}
+```
+
+---
+
+### Funktionen
+
+Benutzerdefinierte Funktionen stehen in `~/.rpnfunc.json` als Array:
+
+```json
 [
-  {"name":"add90","params":1,"rpn":"p1 90 +"}
+  {
+    "name": "add90",
+    "params": 1,
+    "rpn": "p1 90 + dnor"
+  }
 ]
 ```
 
-```bash
-node rpn.js "0 add90 add90 add90"
-# => 270
-```
+Zwei Ausführungsmodi:
 
-#### Step mode
-```bash
-node rpn.js "0 add90 add90 add90" -s
-```
+1. **Standardmodus (Operator-Logik)**  
+   `add90` arbeitet wie ein Operator – es werden automatisch Parameter aus dem Stack geholt und das Ergebnis zurückgeschoben.
 
-#### Precompile mode
-```bash
-node rpn.js "0 add90 add90 add90" -p
-```
+   ```bash
+   node rpn.js "0 add90 add90 add90"
+   # => 270
+   ```
 
-#### Passing parameters via --ctx
-```bash
-node rpn.js "p1 p2 addmul" --ctx '{"params":{"p1":10,"p2":5}}'
-# => 30
-```
+2. **Precompile-Modus (`--precompile`)**  
+   Ersetzt Funktionsnamen **vor der Ausführung** durch ihren Körper ohne `pN`-Platzhalter.
 
-#### Using SimVars
-```bash
-node rpn.js "(A:ALT,ft) 10 + (>A:ALT,ft)" \
-  --ctx '{"simvars":{"ALT,ft":1000}}' --noprompt
-# => sets ALT,ft = 1010
-```
-
-### ⚙️ REPL Commands
-| Command | Description |
-|----------|-------------|
-| (empty) | clears screen and shows help |
-| `:e` | edit `~/.simvars.json` |
-| `:fe` | edit `~/.rpnfunc.json` |
-| `:s` | show simvars |
-| `:l` | show vars |
-| `:r` | reset vars |
-| `:f` | list functions |
-| `:rl` | list result stacks |
-| `:?` | show last postfix as infix |
-| `:= X` | convert infix to postfix and evaluate |
-| `:step` | toggle step mode |
-| `:p` | toggle precompile mode |
-| `:q` | quit REPL |
-
-### 💾 Storage Types
-| Type | Tokens | Behavior |
-|------|---------|-----------|
-| Persistent vars | `s0..s9`, `l0..l9` | `sN` stores top (POP), `lN` loads |
-| Temp registers | `sp0..sp9`, `lp0..lp9` | `spN` stores top (no pop), `lpN` loads |
-| SimVars | `(A:NAME)` / `(>A:NAME)` | read/write from `~/.simvars.json` |
-| Result history | `r1..r8`, `rN,k` | recall last result stacks |
-| Parameters | `p1..pN` | from `--ctx` or prompt |
+   ```bash
+   node rpn.js "0 add90 add90 add90" --precompile
+   # ergibt denselben Endwert, aber rein als expandierter Postfix
+   # 0 90 + dnor 90 + dnor 90 + dnor
+   ```
 
 ---
 
-**Author:** Carsten Suportis  
-**Version:** October 2025
+### Schrittweises Debugging (`--step`, `--endstep`)
+
+Beispiel:
+
+```bash
+node rpn.js "1 2 3 4 + + +" --endstep
+```
+
+Ausgabe:
+```
+1 2 3 4 + + +
+Schritt 1: 1 2 3 4 + + +
+3 4 + = 7
+Schritt 1 Ende: 1 2 7 + +
+Schritt 2: 1 2 7 + +
+2 7 + = 9
+Schritt 2 Ende: 1 9 +
+Schritt 3: 1 9 +
+1 9 + = 10
+Schritt 3 Ende: 10
+10
+```
+
+Mit `--mark` werden hervorgehobene Bereiche als **gelber Hintergrund** angezeigt.  
+Mit `--nocolor` wird jede Farbmarkierung deaktiviert.
+
+---
+
+### Ergebnisse und History
+
+Die letzten bis zu 8 Ergebnisse werden in `~/.rpnstack.json` gespeichert und können mit `r1..r8` referenziert werden.
+
+Beispiel:
+
+```bash
+# Nach mehreren Rechnungen
+r1    # ruft letztes Ergebnis auf
+r2,1  # ruft den ersten Wert des vorletzten Stacks auf
+```
+
+---
+
+### Beispielkonfiguration (`--ctx`)
+
+```json
+{
+  "params": {
+    "p1": 10,
+    "p2": 20
+  },
+  "simvars": {
+    "TEMP,C": 42,
+    "ALT,ft": 1000
+  }
+}
+```
+
+Ausführung:
+```bash
+node rpn.js "p1 p2 + (A:TEMP,C) +" --ctx ctx.json
+```
+
+---
+
+### Tipps
+
+- Funktionsparameter (`p1`, `p2`) in `rpnfunc.json` dürfen **nicht** mit `--ctx`-Parametern verwechselt werden.  
+  Diese gelten nur im **Postfix**, nicht innerhalb rekursiver Funktionsauswertungen.
+
+- Für komplexe Simulationen kann man `~/.simvars.json` live editieren (`:e` im REPL).
+
+---
+
+## 🇬🇧 English
+
+*(Short version of the same concepts)*
+
+### Overview
+
+This project provides:
+
+- **`rpn.js`** – core RPN calculator (Node.js)
+- **`rpn_repl.py`** – interactive REPL wrapper (Python)
+
+You can execute, debug, and visualize RPN expressions step-by-step with persistent variables, functions, and SimVars.
+
+### Example
+
+```bash
+node rpn.js "0 add90 add90 add90" --endstep
+```
+
+Produces:
+
+```
+0 add90 add90 add90
+Schritt 1: 0 add90 add90 add90
+0 add90 = 90
+Schritt 1 Ende: 90 add90 add90
+Schritt 2: 90 add90 add90
+90 add90 = 180
+Schritt 2 Ende: 180 add90
+Schritt 3: 180 add90
+180 add90 = 270
+Schritt 3 Ende: 270
+270
+```
+
+See the German section above for detailed options and examples.
+
+---
+
+© 2025 Suportis / Custom RPN System
