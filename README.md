@@ -63,7 +63,7 @@ node rpn.js "0 add90 add90 add90" -p
 
 #### Mit Parametern via --ctx
 ```bash
-node rpn.js "addmul" --ctx '{"params": {"p1": 10, "p2": 5}}'
+node rpn.js "p1 p2 addmul" --ctx '{"params": {"p1": 10, "p2": 5}}'
 # ~/.rpnfunc.json enthält:
 # [{"name":"addmul","params":2,"rpn":"p1 p2 + 2 *"}]
 # => Ergebnis: 30
@@ -181,7 +181,7 @@ node rpn.js "0 add90 add90 add90" -p
 
 #### Passing parameters via --ctx
 ```bash
-node rpn.js "addmul" --ctx '{"params":{"p1":10,"p2":5}}'
+node rpn.js "p1 p2 addmul" --ctx '{"params":{"p1":10,"p2":5}}'
 # => 30
 ```
 
