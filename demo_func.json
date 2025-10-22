@@ -1,0 +1,13 @@
+[
+  {
+    "name": "add90",
+    "params": 1,
+    "rpn": "p1 90 + dnor"
+  },
+  {
+    "name": "add180",
+    "params": 1,
+    "rpn": "p1 180 + dnor"
+  }
+]
+

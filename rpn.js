@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 /**
- * RPN Evaluator with variables, SimVars, functions and step-mode.
+ * RPN Evaluator with variables, SimVars, functions, history, and rich step display.
  *
- * Highlights
+ * Features
  * - Persistent vars:  s0..s9  (write) / l0..l9 (read) — sN POPS top and stores it; lN pushes stored value
  * - Temp regs:        sp0..sp9 (write) / lp0..lp9 (read) — spN stores TOP (no pop); lpN pushes stored value
- * - SimVars:          (A:NAME,Unit) read,  (>A:NAME,Unit) write (persisted)
- * - Functions:        default = operator-like (pop args, run body as sub-postfix recursively, push result);
- *                     --precompile replaces function tokens upfront with body **without pN** (recursive)
- * - History recall:   r / rN[,k] (last stacks, up to 8)
- * - Step mode:        --step/-s prints reductions; inline highlighting of reducible segment
- * - New options:      --nocolor/-c (no ANSI colors), --mark/-m (marker style), --endstep (also prints postfix after each step and highlights the new result token)
- * - Prompts:          p1..pN get prompted unless provided via --ctx; --noprompt hides labels only
+ * - SimVars:          (A:NAME,Unit) read,  (>A:NAME,Unit) write (persisted in ~/.simvars.json or --sim)
+ * - Functions:        operator-like by default (pop args, run body as sub-postfix, push result);
+ *                     --precompile/-p replaces function tokens upfront with body **without pN** (recursive)
+ * - History recall:   r / rN[,k] (recall last stacks, up to 8) from ~/.rpnstack.json or --stack
+ * - Step mode:        --step/-s prints reductions with inline highlight; --endstep also shows postfix after each step
+ * - Colors:           --nocolor/-c disables ANSI colors; --mark/-m uses yellow background & black text highlights
+ * - Params:           p1..pN get prompted unless provided via --ctx; --noprompt hides labels only
+ * - Admin:            --print prints s0..s9; --reset resets s0..s9  (works without <expr>)
  *
- * Short flags: -s == --step, -p == --precompile, -? == --help, -c == --nocolor, -m == --mark
+ * Short flags: -s == --step, -p == --precompile, -c/-n == --nocolor, -m == --mark, -? == --help
  */
 const fs = require('fs');
 const path = require('path');
@@ -329,7 +330,6 @@ function stepVerbose(expandedTokens, context = {}){
   let step = 1;
   while (true){
     const segStack = [];
-    let reduced = false;
     let highlightStart = -1;
     let highlightEnd = -1;
     let opIndex = -1;
@@ -378,7 +378,7 @@ function stepVerbose(expandedTokens, context = {}){
       res = apply(chosenOp, numsForApply);
     }
     const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
-    console.log(colorize(`${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}`, 'Y'));
+    console.log(`${noColor ? '' : ANSI.yellow}${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}${noColor ? '' : ANSI.reset}`);
 
     // replace args...op with result
     const newToks=[];
@@ -388,7 +388,6 @@ function stepVerbose(expandedTokens, context = {}){
     toks = newToks;
 
     if (endStep) {
-      // show "Schritt X Ende:" with the newly inserted result highlighted
       const resultIndex = highlightStart; // where we inserted res
       const style = marker ? 'M' : 'Y';
       console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
@@ -430,7 +429,7 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
   const doPre  = argv.includes('--precompile') || argv.includes('-p');
   const noPrompt = argv.includes('--noprompt');
 
-  const noColor = argv.includes('--nocolor') || argv.includes('-c') || argv.includes('-n'); // support -n from older note
+  const noColor = argv.includes('--nocolor') || argv.includes('-c') || argv.includes('-n');
   const marker = argv.includes('--mark') || argv.includes('-m');
   const endStep = argv.includes('--endstep');
 
@@ -439,7 +438,20 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
   const funcPath  = resolveArgPath(argv, 'func',  'RPN_FUNCS', '.rpnfunc.json');
   const stackPath = resolveArgPath(argv, 'stack', 'RPN_STACK', '.rpnstack.json');
 
-  // Inline context
+  // ---------- Reset/Print BEFORE help/expr checks ----------
+  if (argv.includes('--reset')) {
+    saveVars(statePath, Array(10).fill(0));
+    console.log('Variablen s0..s9 zurückgesetzt.');
+    console.log('State-Datei:', statePath);
+    return;
+  }
+  if (argv.includes('--print')) {
+    const vars = loadVars(statePath);
+    console.log('Persistente Variablen (s0..s9):', vars);
+    console.log('State-Datei:', statePath);
+    return;
+  }
+
   const ctxIdx = argv.indexOf('--ctx');
   let inlineCtx = {};
   if (ctxIdx !== -1 && argv[ctxIdx + 1]) {
@@ -447,6 +459,7 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
     catch (e) { console.error('Error: --ctx ist kein gültiges JSON:', e.message); process.exit(1); }
   }
 
+  // expression detection AFTER admin flags
   const hasExpr = argv.length && !argv[0].startsWith('--') && !argv[0].startsWith('-');
   const expr = hasExpr ? argv[0] : '';
 
@@ -455,32 +468,28 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
   node rpn.js "<expr>" [options]
 
 Options:
-  --step, -s         Step mode (inline highlight)
-  --precompile, -p   Expand functions upfront (remove pN)
-  --nocolor, -c      Disable ANSI colors (also accepts -n)
-  --mark, -m         Use yellow background (marker style) for highlights
+  --step, -s         Step mode (inline highlight); use --endstep to also show postfix after each step
   --endstep          Also print postfix after each step and highlight the new result token
+  --precompile, -p   Expand functions upfront (remove pN)
+  --nocolor, -c/-n   Disable ANSI colors
+  --mark, -m         Use yellow background (marker style) for highlights
   --noprompt         Hide pN prompt labels (input still required)
   --state FILE       Persistent vars (s0..s9)
   --sim FILE         SimVars file (A:... / (>A:...))
   --func FILE        Functions file (array of {name,params,rpn})
   --stack FILE       Result history file (r1..r8)
   --ctx JSON         Inline context (e.g., simvars, params)
-  --print            Print persistent vars
-  --reset            Reset persistent vars
+  --print            Print persistent vars (works without <expr>)
+  --reset            Reset persistent vars (works without <expr>)
   --help, -?         This help
 
 Examples:
-  node rpn.js "1 2 3 4 + + +" --step --endstep
-  node rpn.js "1 2 3 4 + * +" -s -m
-  node rpn.js "0 add90 add90 add90" -s -p -c
+  node rpn.js "1 2 3 4 + + +" --endstep
+  node rpn.js --print
+  node rpn.js --reset
 `);
     if (!hasExpr) return;
   }
-
-  // Reset/Print pass-through (only if no expr)
-  if (argv.includes('--reset') && !hasExpr) { saveVars(statePath, Array(10).fill(0)); console.log('Variablen s0..s9 zurückgesetzt.'); return; }
-  if (argv.includes('--print') && !hasExpr) { const vars = loadVars(statePath); console.log('Persistente Variablen:', vars); console.log('State-Datei:', statePath); return; }
 
   const vars = loadVars(statePath);
   const functions = loadFuncs(funcPath);
