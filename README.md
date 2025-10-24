@@ -6,6 +6,26 @@ A powerful Reverse Polish Notation (RPN) calculator with persistent variables, l
 
 ## 🇩🇪 Deutsch
 
+### Installation
+
+**Windows**
+
+- Repository klonen
+- python 3 muss insalliert sein (`choco install python -y` ¹) 
+- node >21 muss installiert sein (`choco install nodejs -y` ¹)
+> ¹: Chocolatey installieren: https://chocolatey.org/install
+> 
+> Installation mit chocolatey auf der PowerShell als **Administrator** geöffnet!
+
+- `readline` Module für Python muss installiert sein (`pip install pyreadline3`)
+- `infix-rpn-eval` Module für Node.JS muss installiert sein (`npn i infix-rpn-eval`)
+  
+Starten mit `py rpn_repl.py` oder mit `rpn` und einer kleiner Funktion im PowerShell Profile `$profile` (Ordner und Datei erstellen, falls nicht vorhanden!; danach Neustart der PowerShell notwendig (oder `. $profile`))
+
+```
+function rpn { py <Pfad zur rpn_repl.py Datei> }
+```
+
 ### Übersicht
 
 Dieses Projekt besteht aus zwei Hauptkomponenten:
