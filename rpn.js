@@ -1,21 +1,18 @@
 #!/usr/bin/env node
 /**
- * RPN Evaluator with variables, SimVars, functions, history, conditionals, and rich step display.
+ * RPN Evaluator with variables, SimVars (multi-prefix), functions, history, conditionals,
+ * logic, math helpers, step display (incl. INFIX), and compatibility for legacy A: SimVars.
  *
- * Features
- * - Persistent vars:  s0..s9  (write) / l0..l9 (read) — sN POPS top and stores it; lN pushes stored value
- * - Temp regs:        sp0..sp9 (write) / lp0..lp9 (read) — spN stores TOP (no pop); lpN pushes stored value
- * - SimVars:          (A:NAME,Unit) read,  (>A:NAME,Unit) write (persisted in ~/.simvars.json or --sim)
- * - Functions:        operator-like by default (pop args, run body as sub-postfix, push result);
- *                     --precompile/-p replaces function tokens upfront with body **without pN** (recursive)
- * - History recall:   r / rN[,k] (recall last stacks, up to 8) from ~/.rpnstack.json or --stack
- * - Conditionals:     if{ ... } [else{ ... }] — pops 1 value; executes branch iff value != 0 (truthy)
- * - Step mode:        --step/-s prints reductions with inline highlight; --endstep also shows postfix after each step
- * - Colors:           --nocolor/-c disables ANSI colors; --mark/-m uses yellow background & black text highlights
- * - Params:           p1..pN get prompted unless provided via --ctx; --noprompt hides labels only
- * - Admin:            --print prints s0..s9; --reset resets s0..s9  (works without <expr>)
+ * This build adds:
+ * - SimVars compatibility:
+ *    - In simvars JSON, plain entries under `simvars` (e.g. `"TEST": 5`) are treated as `A:TEST`.
+ *    - New writes to `A:` are persisted under `simvars.A.TEST` (not top-level).
+ * - Step mode: SimVars are printed as their symbolic form (e.g. `(A:XXX)`), not as numeric values.
+ *   Normal (non-step) execution still resolves to numbers.
  *
- * Short flags: -s == --step, -p == --precompile, -c/-n == --nocolor, -m == --mark, -? == --help
+ * Other recent features kept:
+ * - Leading negatives, aliases '=' for '==', '<>' for '!=', logical && || !, pow2/pow/sqrt/sqrt2,
+ *   generic prefixes (A, L, ...), precompile/functions/params/history/if-else/mark/endstep/infix, etc.
  */
 const fs = require('fs');
 const path = require('path');
@@ -56,8 +53,30 @@ function loadJSON(p, def) { try { return JSON.parse(fs.readFileSync(p, 'utf8'));
 function saveJSON(p, obj) { try { atomicWrite(p, JSON.stringify(obj, null, 2)); } catch (e) { console.error('Warn:', e.message); } }
 function loadVars(p) { const o = loadJSON(p, { vars: Array(10).fill(0) }); return Array.isArray(o.vars) ? o.vars.slice(0,10).map(Number) : Array(10).fill(0); }
 function saveVars(p, vars) { saveJSON(p, { vars }); }
-function loadSimvars(p) { const o = loadJSON(p, { simvars: {} }); return o.simvars || {}; }
+
+// simvars persisted per prefix: { simvars: { "A": { "KEY,Unit": v }, "L": { "ABC": v }, ... } }
+// also accept legacy: { simvars: { "TEST": 5 } }  -> A:TEST
+function loadSimvars(p) {
+  const o = loadJSON(p, { simvars: {} });
+  const src = o.simvars || {};
+  const out = {};
+  // copy prefixed maps
+  for (const [k,v] of Object.entries(src)) {
+    if (v && typeof v === 'object' && !Number.isFinite(v)) {
+      out[k] = { ...v };
+    }
+  }
+  // legacy top-level scalars map to A:
+  for (const [k,v] of Object.entries(src)) {
+    if (Number.isFinite(v)) {
+      if (!out.A) out.A = {};
+      out.A[k] = v;
+    }
+  }
+  return out;
+}
 function saveSimvars(p, simvars) { saveJSON(p, { simvars }); }
+
 function loadFuncs(p) { const a = loadJSON(p, []); return Array.isArray(a) ? a.filter(f => f && typeof f.name==='string' && Number.isFinite(f.params) && typeof f.rpn==='string') : []; }
 function loadResults(p) { const o = loadJSON(p, { results: [] }); return Array.isArray(o.results) ? o.results.filter(Array.isArray) : []; }
 function saveResults(p, results) { saveJSON(p, { results: results.slice(0,8) }); }
@@ -92,7 +111,7 @@ function findBlockEnd(toks, openIndex){
     if (t === 'if{' || t === 'else{') depth++;
     else if (t === '}') {
       depth--;
-      if (depth === 0) return i; // index of closing brace
+      if (depth === 0) return i;
     }
   }
   throw new Error("Fehlende schließende '}' für Block ab Index " + openIndex);
@@ -123,23 +142,39 @@ function precompileTokens(tokens, functions) {
 function evaluateRPN(src, options = {}) {
   const tokens = tokenize(src || '');
   const stack = [];
-  const regs = Array(10).fill(0);           // temp registers (session-local)
-  const vars = options.vars || Array(10).fill(0); // persistent vars
-  const simvars = options.simvars || {};
+  const regs = Array(10).fill(0);
+  const vars = options.vars || Array(10).fill(0);
+  const simvars = options.simvars || {};    // { prefix: { key: value } }
   const params = options.params || {};
   const functions = options.functions || [];
   const fnMap = new Map(functions.map(f => [f.name, f]));
   const results = options.results || [];
-  const expandedTokens = tokens.slice(); // use original tokens for step view (so conditionals are visible)
+  const expandedTokens = tokens.slice(); // for step visualization
   let simvarsDirty = false;
 
   function pushValue(val) { stack.push(val); }
   function pop(){ if (!stack.length) throw new Error('stack underflow'); return stack.pop(); }
   function pop2(){ if (stack.length<2) throw new Error('stack underflow'); const b=pop(), a=pop(); return [a,b]; }
+  function pop3(){ if (stack.length<3) throw new Error('stack underflow'); const c=pop(), b=pop(), a=pop(); return [a,b,c]; }
   function runTokens(toks){ let i=0; while(i<toks.length) i = resolveToken(toks[i], i, toks); }
 
+  const reSim = /^\((>?)([A-Za-z]+):(.*)\)$/; // (X:KEY) or (>X:KEY)
+
+  function getSimValue(prefix, key, sim) {
+    const dict = sim[prefix] || {};
+    if (prefix === 'A' && dict[key] == null && sim[key] != null && Number.isFinite(sim[key])) {
+      // compatibility: legacy top-level value
+      return sim[key];
+    }
+    return dict[key] ?? 0;
+  }
+  function setSimValue(prefix, key, val, sim) {
+    if (!sim[prefix]) sim[prefix] = {};
+    sim[prefix][key] = toNum(val);
+  }
+
   function resolveToken(t, idx, toks) {
-    // numbers
+    // numbers (includes leading negatives)
     if (isNumberToken(t)) { pushValue(parseNumber(t)); return idx+1; }
 
     // top-level params
@@ -165,9 +200,20 @@ function evaluateRPN(src, options = {}) {
     if (/^sp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const valTop = stack.length?stack[stack.length-1]:0; regs[n]=toNum(valTop); return idx+1; }
     if (/^lp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const val = regs[n] ?? 0; pushValue(val); return idx+1; }
 
-    // SimVars
-    if (t.startsWith('(A:') && t.endsWith(')')) { const key=t.slice(3,-1).trim(); const val=simvars[key]??0; pushValue(val); return idx+1; }
-    if (t.startsWith('(>A:') && t.endsWith(')')){ const key=t.slice(4,-1).trim(); const val=pop(); simvars[key]=toNum(val); simvarsDirty=true; return idx+1; }
+    // SimVars (generic prefixes)
+    if (reSim.test(t)) {
+      const [, write, prefix, keyRaw] = reSim.exec(t);
+      const key = keyRaw.trim();
+      if (write) {
+        const val = pop();
+        setSimValue(prefix, key, val, simvars);
+        simvarsDirty = true;
+      } else {
+        const val = getSimValue(prefix, key, simvars);
+        pushValue(val);
+      }
+      return idx+1;
+    }
 
     // Conditionals if{ ... } [else{ ... }]
     if (t === 'if{') {
@@ -209,29 +255,36 @@ function evaluateRPN(src, options = {}) {
 
     // operators
     switch (t) {
+      // arithmetic
       case '+': { const [a,b]=pop2(); pushValue(toNum(a)+toNum(b)); break; }
       case '-': { const [a,b]=pop2(); pushValue(toNum(a)-toNum(b)); break; }
       case '*': { const [a,b]=pop2(); pushValue(toNum(a)*toNum(b)); break; }
       case '/': { const [a,b]=pop2(); pushValue(toNum(a)/toNum(b)); break; }
       case '%': { const [a,b]=pop2(); pushValue(toNum(a)%toNum(b));  break; }
       case '^': { const [a,b]=pop2(); pushValue(Math.pow(toNum(a),toNum(b))); break; }
+      case 'pow2': { const a=pop(); pushValue(Math.pow(toNum(a),2)); break; }
+      case 'pow': { const [a,b]=pop2(); pushValue(Math.pow(toNum(a), toNum(b))); break; }
+      case 'sqrt2': { const a=pop(); pushValue(Math.sqrt(toNum(a))); break; }
+      case 'sqrt': { const [a,b]=pop2(); pushValue(Math.pow(toNum(a), 1/ toNum(b))); break; }
 
+      // comparisons
       case '>':  { const [a,b]=pop2(); pushValue(toNum(a)> toNum(b)?1:0);  break; }
       case '<':  { const [a,b]=pop2(); pushValue(toNum(a)< toNum(b)?1:0);  break; }
       case '>=': { const [a,b]=pop2(); pushValue(toNum(a)>=toNum(b)?1:0); break; }
       case '<=': { const [a,b]=pop2(); pushValue(toNum(a)<=toNum(b)?1:0); break; }
-      case '==': { const [a,b]=pop2(); pushValue(toNum(a)===toNum(b)?1:0); break; }
-      case '!=': { const [a,b]=pop2(); pushValue(toNum(a)!==toNum(b)?1:0); break; }
+      case '==': case '=': { const [a,b]=pop2(); pushValue(toNum(a)===toNum(b)?1:0); break; }
+      case '!=': case '<>': { const [a,b]=pop2(); pushValue(toNum(a)!==toNum(b)?1:0); break; }
 
-      case 'and': { const [a,b]=pop2(); pushValue(truthy(a)&&truthy(b)?1:0); break; }
-      case 'or':  { const [a,b]=pop2(); pushValue(truthy(a)||truthy(b)?1:0);  break; }
-      case 'not': { const a=pop();     pushValue(truthy(a)?0:1);              break; }
+      // logic
+      case 'and': case '&&': { const [a,b]=pop2(); pushValue(truthy(a)&&truthy(b)?1:0); break; }
+      case 'or':  case '||': { const [a,b]=pop2(); pushValue(truthy(a)||truthy(b)?1:0);  break; }
+      case 'not': case '!':  { const a=pop();     pushValue(truthy(a)?0:1);              break; }
 
+      // math helpers
       case 'round':{ const a=pop(); pushValue(Math.round(toNum(a))); break; }
       case 'floor':{ const a=pop(); pushValue(Math.floor(toNum(a))); break; }
       case 'ceil': { const a=pop(); pushValue(Math.ceil(toNum(a)));  break; }
       case 'abs':  { const a=pop(); pushValue(Math.abs(toNum(a)));   break; }
-      case 'sqrt': { const a=pop(); pushValue(Math.sqrt(toNum(a)));  break; }
       case 'sin':  { const a=pop(); pushValue(Math.sin(toNum(a)));   break; }
       case 'cos':  { const a=pop(); pushValue(Math.cos(toNum(a)));   break; }
       case 'tan':  { const a=pop(); pushValue(Math.tan(toNum(a)));   break; }
@@ -242,6 +295,7 @@ function evaluateRPN(src, options = {}) {
       case 'clamp':{ const minVal=pop(), maxVal=pop(), val=pop();
                      pushValue(Math.max(toNum(minVal), Math.min(toNum(maxVal), toNum(val)))); break; }
 
+      // headings normalization
       case 'dnor':{ const a=pop(); const x=toNum(a); pushValue(((x % 360) + 360) % 360); break; }
 
       case 'Boolean': case 'Number': case ',': return idx + 1;
@@ -255,46 +309,56 @@ function evaluateRPN(src, options = {}) {
   return { stack, regs, vars, simvars, originalTokens: expandedTokens, simvarsDirty, functions };
 }
 
-/* ---------- step-by-step (inline highlight, incl. conditionals) ---------- */
+/* ---------- step-by-step (inline highlight, incl. conditionals, functions, INFIX mode) ---------- */
 function stepVerbose(tokensInput, context = {}){
   let toks = tokensInput.slice();
   const vars = context.vars || Array(10).fill(0);
   const regs = context.regs || Array(10).fill(0);
-  const simvars = context.simvars || {};
+  const simvars = context.simvars || {}; // {prefix:{key:value}}
   const functions = context.functions || [];
   const fnMap = new Map(functions.map(f => [f.name, f]));
 
   const noColor = !!context.noColor;
   const marker = !!context.marker;
   const endStep = !!context.endStep;
+  const infixMode = !!context.infixMode;
 
   if (noColor) {
     ANSI.reset = ANSI.red = ANSI.yellow = ANSI.markOn = ANSI.markOff = '';
   }
 
   const isNum = (t)=>/^[-+]?\d+(?:[.,]\d+)?$/.test(String(t));
+  const reSimRead = /^\(([A-Za-z]+):(.*)\)$/;
 
   function tokenIsValue(t){
     if (isNum(t)) return true;
     if (/^l\d+$/.test(t)) return true;
     if (/^lp\d+$/.test(t)) return true;
-    if (String(t).startsWith('(A:') && String(t).endsWith(')')) return true;
+    // SimVars count as "values" for reduction purposes, but we will *display* their symbol, not numeric
+    if (reSimRead.test(String(t))) return true;
     return false;
   }
   function tokenValue(t){
     if (isNum(t)) return parseFloat(String(t).replace(',','.'));
     if (/^l\d+$/.test(t)) return vars[parseInt(String(t).slice(1),10)]||0;
     if (/^lp\d+$/.test(t)) return regs[parseInt(String(t).slice(2),10)]||0;
-    if (String(t).startsWith('(A:') && String(t).endsWith(')')){ const key=String(t).slice(3,-1).trim(); return simvars[key]??0; }
+    const m = reSimRead.exec(String(t));
+    if (m){
+      const [,pref,keyRaw]=m;
+      const key=keyRaw.trim();
+      const dict = simvars[pref]||{};
+      if (pref==='A' && dict[key]==null && Number.isFinite(simvars[key])) return simvars[key];
+      return dict[key]??0;
+    }
     throw new Error("Token not a value: "+t);
   }
-  const UN_OPS = new Set(['not','round','floor','ceil','abs','sqrt','sin','cos','tan','log','exp','dnor']);
-  const BIN_OPS = new Set(['+','-','*','/','%','^','>','<','>=','<=','==','!=','and','or','min','max']);
+  const UN_OPS = new Set(['not','!','round','floor','ceil','abs','sqrt2','sin','cos','tan','log','exp','dnor','pow2']);
+  const BIN_OPS = new Set(['+','-','*','/','%','^','>','<','>=','<=','==','=','!=','<>','and','&&','or','||','min','max','pow','sqrt']);
   function arity(op){
     if (UN_OPS.has(op)) return 1;
     if (BIN_OPS.has(op)) return 2;
     if (op === 'clamp') return 3;
-    if (op === 'if{') return 1; // conditional pops 1 value
+    if (op === 'if{') return 1;
     const f = fnMap.get(op);
     if (f) return f.params;
     return 0;
@@ -307,20 +371,23 @@ function stepVerbose(tokensInput, context = {}){
       case '/': return arr[0]/arr[1];
       case '%': return arr[0]%arr[1];
       case '^': return Math.pow(arr[0],arr[1]);
+      case 'pow2': return Math.pow(arr[0],2);
+      case 'pow': return Math.pow(arr[0],arr[1]);
+      case 'sqrt2': return Math.sqrt(arr[0]);
+      case 'sqrt': return Math.pow(arr[0], 1/arr[1]);
       case '>': return arr[0]>arr[1]?1:0;
       case '<': return arr[0]<arr[1]?1:0;
       case '>=': return arr[0]>=arr[1]?1:0;
       case '<=': return arr[0]<=arr[1]?1:0;
-      case '==': return arr[0]===arr[1]?1:0;
-      case '!=': return arr[0]!==arr[1]?1:0;
-      case 'and': return (arr[0]?1:0)&&(arr[1]?1:0)?1:0;
-      case 'or' : return (arr[0]?1:0)||(arr[1]?1:0)?1:0;
-      case 'not': return arr[0]?0:1;
+      case '==': case '=': return arr[0]===arr[1]?1:0;
+      case '!=': case '<>': return arr[0]!==arr[1]?1:0;
+      case 'and': case '&&': return (arr[0]?1:0)&&(arr[1]?1:0)?1:0;
+      case 'or' : case '||': return (arr[0]?1:0)||(arr[1]?1:0)?1:0;
+      case 'not': case '!':  return arr[0]?0:1;
       case 'round': return Math.round(arr[0]);
       case 'floor': return Math.floor(arr[0]);
       case 'ceil' : return Math.ceil(arr[0]);
       case 'abs'  : return Math.abs(arr[0]);
-      case 'sqrt' : return Math.sqrt(arr[0]);
       case 'sin'  : return Math.sin(arr[0]);
       case 'cos'  : return Math.cos(arr[0]);
       case 'tan'  : return Math.tan(arr[0]);
@@ -335,7 +402,7 @@ function stepVerbose(tokensInput, context = {}){
   }
 
   function colorize(text, style) {
-    if (noColor) return text;
+    const noC = (ANSI.reset===''); if (noC) return text;
     if (style === 'Y') return ANSI.yellow + text + ANSI.reset;
     if (style === 'R') return ANSI.red + text + ANSI.reset;
     if (style === 'M') return ANSI.markOn + text + ANSI.markOff;
@@ -384,10 +451,9 @@ function stepVerbose(tokensInput, context = {}){
       let k = arity(t);
       if (k===0) continue;
 
-      // special preview for if{ to compute the block range
+      // preview for if{
       if (t === 'if{') {
         if (segStack.length < 1) continue;
-        // find block end and optional else
         const endIf = findBlockEnd(toks, i);
         let hasElse = false, elseStart = -1, endElse = -1;
         if (toks[endIf + 1] === 'else{') { hasElse = true; elseStart = endIf + 1; endElse = findBlockEnd(toks, elseStart); }
@@ -395,7 +461,7 @@ function stepVerbose(tokensInput, context = {}){
         argsForLog = args;
         numsForApply = args.map(a=>a.val);
         highlightStart = args[0].start;
-        highlightEnd = hasElse ? endElse : endIf; // include entire branch structure
+        highlightEnd = hasElse ? endElse : endIf;
         opIndex = i;
         chosenOp = t;
         break;
@@ -431,19 +497,15 @@ function stepVerbose(tokensInput, context = {}){
       const ifBody = toks.slice(opIndex + 1, endIf);
       const elseBody = hasElse ? toks.slice(elseStart + 1, endElse) : [];
       const body = takeIf ? ifBody : elseBody;
-      // evaluate body
-      const sub = evaluateRPN(body.join(' '), { vars: vars.slice(), simvars: {...simvars}, functions: Array.from(fnMap.values()), results: [] });
+      const sub = evaluateRPN(body.join(' '), { vars: vars.slice(), simvars: JSON.parse(JSON.stringify(simvars)), functions: Array.from(fnMap.values()), results: [] });
       const outVals = sub.stack.map(v => String(Number.isFinite(v) && Math.abs(v - Math.round(v))<1e-12 ? Math.round(v) : v));
       const which = takeIf ? 'IF' : (hasElse ? 'ELSE' : 'NONE');
 
-      // Build semantic preview line:
-      // cond if{ visibleIf } else{ visibleElse } -> Zweig: WHICH -> outputs
       const visibleIf = takeIf ? ifBody.join(' ') : '...';
       const visibleElse = hasElse ? (takeIf ? '...' : elseBody.join(' ')) : null;
       const preview = `${argsForLog[0].text} if{ ${visibleIf} }${hasElse ? ` else{ ${visibleElse} }` : ''} → Zweig: ${which} → ${outVals.join(' ')}`;
-      console.log(`${noColor ? '' : ANSI.yellow}${preview}${noColor ? '' : ANSI.reset}`);
+      console.log(`${ANSI.yellow}${preview}${ANSI.reset}`);
 
-      // replace [cond, if{...} [else{...}]] with outVals
       newToks = [];
       newToks.push(...toks.slice(0, highlightStart));
       newToks.push(...outVals);
@@ -466,24 +528,48 @@ function stepVerbose(tokensInput, context = {}){
       if (f){
         const subToks = tokenize(f.rpn).map(tok => /^p(\d+)$/.test(tok) ? String(numsForApply[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
         const subExpr = subToks.join(' ');
-        const sub = evaluateRPN(subExpr, { vars: vars.slice(), simvars: {...simvars}, functions: Array.from(fnMap.values()), results: [] });
+        const sub = evaluateRPN(subExpr, { vars: vars.slice(), simvars: JSON.parse(JSON.stringify(simvars)), functions: Array.from(fnMap.values()), results: [] });
         res = sub.stack.length ? sub.stack[sub.stack.length-1] : 0;
+        const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
+        console.log(`${ANSI.yellow}${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}${ANSI.reset}`);
+
+        newToks=[];
+        newToks.push(...toks.slice(0, highlightStart));
+        newToks.push(resStr);
+        newToks.push(...toks.slice(opIndex+1));
+        toks = newToks;
+
+        if (endStep) {
+          const resultIndex = highlightStart;
+          const style = marker ? 'M' : 'Y';
+          console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
+        }
       } else {
-        res = apply(chosenOp, numsForApply);
-      }
-      const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
-      console.log(`${noColor ? '' : ANSI.yellow}${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}${noColor ? '' : ANSI.reset}`);
+        const resVal = apply(chosenOp, numsForApply);
+        const resStr = String(Number.isFinite(resVal) && Math.abs(resVal - Math.round(resVal))<1e-12 ? Math.round(resVal) : resVal);
 
-      newToks=[];
-      newToks.push(...toks.slice(0, highlightStart));
-      newToks.push(resStr);
-      newToks.push(...toks.slice(opIndex+1));
-      toks = newToks;
+        if (infixMode && BIN_OPS.has(chosenOp) && numsForApply.length === 2) {
+          const left = argsForLog[0].text;
+          const right = argsForLog[1].text;
+          console.log(`${ANSI.yellow}${left} ${chosenOp} ${right} = ${resStr}${ANSI.reset}`);
+        } else if (infixMode && UN_OPS.has(chosenOp) && numsForApply.length === 1) {
+          const a = argsForLog[0].text;
+          console.log(`${ANSI.yellow}${chosenOp} ${a} = ${resStr}${ANSI.reset}`);
+        } else {
+          console.log(`${ANSI.yellow}${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}${ANSI.reset}`);
+        }
 
-      if (endStep) {
-        const resultIndex = highlightStart;
-        const style = marker ? 'M' : 'Y';
-        console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
+        newToks=[];
+        newToks.push(...toks.slice(0, highlightStart));
+        newToks.push(resStr);
+        newToks.push(...toks.slice(opIndex+1));
+        toks = newToks;
+
+        if (endStep) {
+          const resultIndex = highlightStart;
+          const style = marker ? 'M' : 'Y';
+          console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
+        }
       }
     }
 
@@ -526,6 +612,7 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
   const noColor = argv.includes('--nocolor') || argv.includes('-c') || argv.includes('-n');
   const marker = argv.includes('--mark') || argv.includes('-m');
   const endStep = argv.includes('--endstep');
+  const infixMode = argv.includes('--infix') || argv.includes('-i');
 
   const statePath = resolveArgPath(argv, 'state', 'RPN_STATE', '.rpn_state.json');
   const simPath   = resolveArgPath(argv, 'sim',   'RPN_SIMVARS', '.simvars.json');
@@ -564,12 +651,13 @@ async function promptParamsIfNeeded(expr, initialParams = {}, { noPrompt = false
 Options:
   --step, -s         Step mode (inline highlight); use --endstep to also show postfix after each step
   --endstep          Also print postfix after each step and highlight the new result token
+  --infix, -i        Show each step reduction as infix (e.g., "9 - 5 = 4")
   --precompile, -p   Expand functions upfront (remove pN)
   --nocolor, -c/-n   Disable ANSI colors
   --mark, -m         Use yellow background (marker style) for highlights
   --noprompt         Hide pN prompt labels (input still required)
   --state FILE       Persistent vars (s0..s9)
-  --sim FILE         SimVars file (A:... / (>A:...))
+  --sim FILE         SimVars file (generic prefixes, e.g., A:, L:)
   --func FILE        Functions file (array of {name,params,rpn})
   --stack FILE       Result history file (r1..r8)
   --ctx JSON         Inline context (e.g., simvars, params)
@@ -578,19 +666,19 @@ Options:
   --help, -?         This help
 
 Examples:
-  node rpn.js "1 2 3 4 + + +" --endstep
-  node rpn.js "1 if{ 2 + }"
-  node rpn.js "0 if{ 2 + } else{ 5 + }"
-  node rpn.js --print
-  node rpn.js --reset
+  node rpn.js "(A:TEMP,C) 2 *" --ctx '{"simvars":{"A":{"TEMP,C":21}}}'
+  node rpn.js "1 if{ 2 + } else{ 3 + }"
+  node rpn.js "9 5 - 2 /" --step --infix
+  node rpn.js "-5 10 +"
+  node rpn.js "27 3 sqrt"
 `);
     if (!hasExpr) return;
   }
 
   const vars = loadVars(statePath);
   const functions = loadFuncs(funcPath);
-  const fileSimvars = loadSimvars(simPath);
-  const runtimeSimvars = { ...fileSimvars, ...(inlineCtx.simvars || {}) };
+  const fileSimvars = loadSimvars(simPath);   // normalized {A:{}, L:{}, ...}
+  const runtimeSimvars = Object.assign({}, fileSimvars, inlineCtx.simvars || {});
   const resultsHistory = loadResults(stackPath);
 
   (async () => {
@@ -619,7 +707,13 @@ Examples:
 
       const doStepEffective = (endStep || (argv.includes('--step') || argv.includes('-s')));
       if (doStepEffective) {
-        stepVerbose(originalTokens, { vars: outVars, regs, simvars: outSimvars, functions: outFunctions, noColor, marker, endStep });
+        stepVerbose(originalTokens, {
+          vars: outVars, regs, simvars: outSimvars, functions: outFunctions,
+          noColor: (argv.includes('--nocolor') || argv.includes('-c') || argv.includes('-n')),
+          marker: (argv.includes('--mark') || argv.includes('-m')),
+          endStep: argv.includes('--endstep'),
+          infixMode: (argv.includes('--infix') || argv.includes('-i'))
+        });
       } else {
         console.log(stack.join(' '));
       }
