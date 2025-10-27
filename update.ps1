@@ -15,3 +15,9 @@ if (Test-Path "/Users/carstenschlegel/Downloads/readme.md") {
     del "/Users/carstenschlegel/Downloads/readme.md"
     Write-Host "readme.md upgedated"
 }
+
+if (Test-Path "/Users/carstenschlegel/Downloads/rpn_calc.py") {
+    copy "/Users/carstenschlegel/Downloads/rpn_calc.py" . -Force
+    del "/Users/carstenschlegel/Downloads/rpn_calc.py"
+    Write-Host "rpn_calc.py"
+}
