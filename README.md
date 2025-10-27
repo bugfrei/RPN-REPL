@@ -1,6 +1,6 @@
 # RPN Calculator & REPL
 
-A powerful Reverse Polish Notation (RPN) calculator with persistent variables, local registers, SimVars, custom functions, step-by-step visualization, and a full-featured REPL environment.
+A powerful Reverse Polish Notation (RPN) calculator with persistent variables, local registers, SimVars, custom functions, step-by-step visualization, conditionals, and a full-featured REPL environment.
 
 ---
 
@@ -11,42 +11,30 @@ A powerful Reverse Polish Notation (RPN) calculator with persistent variables, l
 **Windows**
 
 - Repository klonen
-- python 3 muss insalliert sein (`choco install python -y` ¹) 
-- node >21 muss installiert sein (`choco install nodejs -y` ¹)
-> ¹: Chocolatey installieren: https://chocolatey.org/install
-> 
+- Python 3 muss installiert sein (`choco install python -y` ¹) 
+- Node.js >21 muss installiert sein (`choco install nodejs -y` ¹)
+> ¹: Chocolatey installieren: https://chocolatey.org/install  
 > Installation mit chocolatey auf der PowerShell als **Administrator** geöffnet!
 
-- `readline` Module für Python muss installiert sein (`pip install pyreadline3`)
-- `infix-rpn-eval` Module für Node.JS muss installiert sein (`npn i infix-rpn-eval`)
-  
-Starten mit `py rpn_repl.py` oder mit `rpn` und einer kleiner Funktion im PowerShell Profile `$profile` (Ordner und Datei erstellen, falls nicht vorhanden!; danach Neustart der PowerShell notwendig (oder `. $profile`))
+- `readline`-Modul für Python muss installiert sein (`pip install pyreadline3`)
+- `infix-rpn-eval`-Modul für Node.js muss installiert sein (`npm i infix-rpn-eval`)
 
-```
+Starten mit `py rpn_repl.py` oder über eine kleine Funktion im PowerShell-Profil `$profile`:
+
+```powershell
 function rpn { py <Pfad zur rpn_repl.py Datei> }
 ```
+
+---
 
 ### Übersicht
 
 Dieses Projekt besteht aus zwei Hauptkomponenten:
 
 - **`rpn.js`** – Der eigentliche RPN-Interpreter (Node.js)
-- **`rpn_repl.py`** – Ein komfortabler interaktiver REPL für `rpn.js` (Python)
+- **`rpn_repl.py`** – Ein interaktiver REPL für `rpn.js` (Python)
 
-Mit beiden Komponenten lassen sich komplexe Postfix-Ausdrücke, Variablen, Funktionen und Simulationen ausführen, debuggen und schrittweise nachvollziehen.
-
----
-
-### Installation
-
-```bash
-# Node.js erforderlich (>=18)
-npm install -g infix-rpn-eval
-
-# Dateien ausführbar machen (optional)
-chmod +x rpn.js
-chmod +x rpn_repl.py
-```
+Mit beiden lassen sich komplexe Postfix-Ausdrücke, Variablen, Funktionen, Bedingungen und Simulationen ausführen und schrittweise nachvollziehen.
 
 ---
 
@@ -96,9 +84,11 @@ node rpn.js "1 2 3 + *"
 
 | Befehl | Beschreibung |
 |---------|---------------|
+| `:i` | Eingabemodus (Einzeltoken) umschalten |
+| `:ip` | Eingabe-Prompt (Postfixanzeige) umschalten |
 | `:p` | Precompile-Modus umschalten |
 | `:step` | Step-Modus umschalten |
-| `:color` | No-Color umschalten |
+| `:color` | Farbmodus umschalten |
 | `:mark` | Marker-Stil umschalten |
 | `:end` | Endstep-Modus umschalten (impliziert Step) |
 | `:s` | SimVars anzeigen |
@@ -122,13 +112,6 @@ node rpn.js "1 2 3 + *"
 | `l0` | lädt den Wert aus `s0` auf den Stack |
 | `5 sp0` | speichert 5 temporär in `sp0` (session-only) |
 | `lp0` | lädt den Wert aus `sp0` |
-
-```bash
-5 s0
-l0      # ergibt 5
-5 sp0
-lp0     # ergibt 5
-```
 
 ---
 
@@ -161,15 +144,40 @@ Beispiel:
 # -> 20
 ```
 
-In der Datei `~/.simvars.json` werden sie automatisch gespeichert:
+---
 
-```json
-{
-  "simvars": {
-    "TEMP,C": 20
-  }
-}
+### Bedingungen (`if{ ... } else{ ... }`)
+
+Bedingte Ausdrücke werden mit `if{}` und optional `else{}` geschrieben.
+Der Ausdruck vor `if{}` wird als Bedingung ausgewertet:
+- Ist der Wert ≠ 0 → **IF-Zweig** wird ausgeführt.
+- Ist der Wert = 0 → **ELSE-Zweig** (falls vorhanden).
+
+Syntax:
+```bash
+<cond> if{ <RPN bei wahr> } [else{ <RPN bei falsch> }]
 ```
+
+Beispiel:
+```bash
+1 if{ 11 } else{ 22 }    # → 11
+0 if{ 11 } else{ 22 }    # → 22
+```
+
+Schrittweise Ausgabe (`--step`):
+```
+1 if{ 11 } else{ 22 }
+Schritt 1: 1 if{ 11 } else{ 22 }
+1 if{ 11 } else{ ... } → Zweig: IF → 11
+11
+
+0 if{ 11 } else{ 22 }
+Schritt 1: 0 if{ 11 } else{ 22 }
+0 if{ ... } else{ 22 } → Zweig: ELSE → 22
+22
+```
+
+Bedingungsblöcke können beliebige RPN-Ausdrücke enthalten, auch **SimVar-Zugriffe oder Funktionsaufrufe**.
 
 ---
 
@@ -210,8 +218,6 @@ Zwei Ausführungsmodi:
 
 ### Schrittweises Debugging (`--step`, `--endstep`)
 
-Beispiel:
-
 ```bash
 node rpn.js "1 2 3 4 + + +" --endstep
 ```
@@ -243,7 +249,6 @@ Die letzten bis zu 8 Ergebnisse werden in `~/.rpnstack.json` gespeichert und kö
 Beispiel:
 
 ```bash
-# Nach mehreren Rechnungen
 r1    # ruft letztes Ergebnis auf
 r2,1  # ruft den ersten Wert des vorletzten Stacks auf
 ```
@@ -272,18 +277,7 @@ node rpn.js "p1 p2 + (A:TEMP,C) +" --ctx ctx.json
 
 ---
 
-### Tipps
-
-- Funktionsparameter (`p1`, `p2`) in `rpnfunc.json` dürfen **nicht** mit `--ctx`-Parametern verwechselt werden.  
-  Diese gelten nur im **Postfix**, nicht innerhalb rekursiver Funktionsauswertungen.
-
-- Für komplexe Simulationen kann man `~/.simvars.json` live editieren (`:e` im REPL).
-
----
-
 ## 🇬🇧 English
-
-*(Short version of the same concepts)*
 
 ### Overview
 
@@ -292,31 +286,31 @@ This project provides:
 - **`rpn.js`** – core RPN calculator (Node.js)
 - **`rpn_repl.py`** – interactive REPL wrapper (Python)
 
-You can execute, debug, and visualize RPN expressions step-by-step with persistent variables, functions, and SimVars.
+You can execute, debug, and visualize RPN expressions step-by-step with persistent variables, functions, SimVars, and conditional logic.
 
-### Example
+### Example (with conditionals)
 
 ```bash
-node rpn.js "0 add90 add90 add90" --endstep
+node rpn.js "1 if{ 11 } else{ 22 }" --step
+```
+Output:
+```
+1 if{ 11 } else{ 22 }
+Step 1: 1 if{ 11 } else{ 22 }
+1 if{ 11 } else{ ... } -> Branch: IF -> 11
+11
 ```
 
-Produces:
-
+```bash
+node rpn.js "0 if{ 11 } else{ 22 }" --step
 ```
-0 add90 add90 add90
-Schritt 1: 0 add90 add90 add90
-0 add90 = 90
-Schritt 1 Ende: 90 add90 add90
-Schritt 2: 90 add90 add90
-90 add90 = 180
-Schritt 2 Ende: 180 add90
-Schritt 3: 180 add90
-180 add90 = 270
-Schritt 3 Ende: 270
-270
+Output:
 ```
-
-See the German section above for detailed options and examples.
+0 if{ 11 } else{ 22 }
+Step 1: 0 if{ 11 } else{ 22 }
+0 if{ ... } else{ 22 } -> Branch: ELSE -> 22
+22
+```
 
 ---
 

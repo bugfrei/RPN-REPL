@@ -49,12 +49,18 @@ Step "Parameter aus cts JSON"
 node rpn.js "p1 p2 +" --ctx '{ "params": { "p1": 10, "p2": 20 } }'
 Erg "Ergebnis: 30"
 
+Step "Setzen von Variablen (s0=1, s1=2)"
+node rpn.js "1 s0 2 s1"
+node rpn.js "l0 l1"
+Erg "Ergebnis: 1 2"
+
 Step "Ausgabe der Variablen (--print)"
 node rpn.js --print
 Erg "Variablenliste"
 
-Step "Zurücksetzen der Variablen (--reset)"
+Step "Zurücksetzen der Variablen (--reset) und deren Ausgabe"
 node rpn.js --reset
+node rpn.js --print
 Erg "Variablen zurückgesetzt"
 
 Step "Testen der demo_func.json (add180)"
@@ -81,6 +87,27 @@ node rpn.js "r" --stack ./demo_stack.json
 node rpn.js "r2" --stack ./demo_stack.json
 node rpn.js "r2,3" --stack ./demo_stack.json
 Erg "Ergebnis: 1 `n 1 2 3 4 5 `n 3"
+
+Step "Testen von if{ else{"
+node rpn.js "1 if{ 11 (>A:XXX) } else{ 21 (>A:XXX) }"
+node rpn.js "(A:XXX)"
+node rpn.js "0 if{ 11 (>A:XXX) } else{ 21 (>A:XXX) }"
+node rpn.js "(A:XXX)"
+Erg "Ergebnis: 11 `n 21"
+
+Step "Testen von if{ else{ im Step Modus"
+node rpn.js "1 if{ 2 (>A:XXX) 22 100 } else{ 3 (>A:XXX) 33 100 }" --step; node rpn.js "(A:XXX)"
+Erg "Ergebnis: 22 100 `n 2"
+
+Step "Testen von if{ else{ mit Funktionen im Step Modus"
+node rpn.js "1 if{ 2 (>A:XXX) 22 100 add90 } else{ 3 (>A:XXX) 33 100 add90 } +" --step; node rpn.js "(A:XXX)"
+Erg "Ergebnis 212`n 2"
+
+Step "Testen von if{ else{ mit Funktionen im Step Modus und Precompile"
+node rpn.js "1 if{ 2 (>A:XXX) 22 100 add90 } else{ 3 (>A:XXX) 33 100 add90 } +" --step --precompile; node rpn.js "(A:XXX)"
+Erg "Ergebnis 212`n 2"
+
+
 
 Write-Host "Fertig"
 

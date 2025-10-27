@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * RPN Evaluator with variables, SimVars, functions, history, and rich step display.
+ * RPN Evaluator with variables, SimVars, functions, history, conditionals, and rich step display.
  *
  * Features
  * - Persistent vars:  s0..s9  (write) / l0..l9 (read) — sN POPS top and stores it; lN pushes stored value
@@ -9,6 +9,7 @@
  * - Functions:        operator-like by default (pop args, run body as sub-postfix, push result);
  *                     --precompile/-p replaces function tokens upfront with body **without pN** (recursive)
  * - History recall:   r / rN[,k] (recall last stacks, up to 8) from ~/.rpnstack.json or --stack
+ * - Conditionals:     if{ ... } [else{ ... }] — pops 1 value; executes branch iff value != 0 (truthy)
  * - Step mode:        --step/-s prints reductions with inline highlight; --endstep also shows postfix after each step
  * - Colors:           --nocolor/-c disables ANSI colors; --mark/-m uses yellow background & black text highlights
  * - Params:           p1..pN get prompted unless provided via --ctx; --noprompt hides labels only
@@ -83,6 +84,20 @@ function truthy(v){ return !!toNum(v); }
 function fmt(v){ const n = Number(v); if (Number.isFinite(n) && Math.abs(n - Math.round(n)) < 1e-12) return String(Math.round(n)); return String(n); }
 function isPureRTokenExpression(src){ const toks = tokenize(src || ''); return toks.length === 1 && /^r(\d+)?(,\d+)?$/.test(toks[0]); }
 
+/* ---------- helper: find matching '}' from an opening token index ---------- */
+function findBlockEnd(toks, openIndex){
+  let depth = 1;
+  for (let i = openIndex + 1; i < toks.length; i++) {
+    const t = toks[i];
+    if (t === 'if{' || t === 'else{') depth++;
+    else if (t === '}') {
+      depth--;
+      if (depth === 0) return i; // index of closing brace
+    }
+  }
+  throw new Error("Fehlende schließende '}' für Block ab Index " + openIndex);
+}
+
 /* ---------- precompile (replace function tokens with body without pN) ---------- */
 function precompileTokens(tokens, functions) {
   const funcMap = new Map(functions.map(f => [f.name, f]));
@@ -115,23 +130,20 @@ function evaluateRPN(src, options = {}) {
   const functions = options.functions || [];
   const fnMap = new Map(functions.map(f => [f.name, f]));
   const results = options.results || [];
-  const expandedTokens = [];
+  const expandedTokens = tokens.slice(); // use original tokens for step view (so conditionals are visible)
   let simvarsDirty = false;
 
-  function pushValue(val, tokenForEmission) {
-    stack.push(val);
-    if (tokenForEmission != null) expandedTokens.push(tokenForEmission);
-  }
+  function pushValue(val) { stack.push(val); }
   function pop(){ if (!stack.length) throw new Error('stack underflow'); return stack.pop(); }
   function pop2(){ if (stack.length<2) throw new Error('stack underflow'); const b=pop(), a=pop(); return [a,b]; }
   function runTokens(toks){ let i=0; while(i<toks.length) i = resolveToken(toks[i], i, toks); }
 
   function resolveToken(t, idx, toks) {
     // numbers
-    if (isNumberToken(t)) { const v=parseNumber(t); pushValue(v, fmt(v)); return idx+1; }
+    if (isNumberToken(t)) { pushValue(parseNumber(t)); return idx+1; }
 
     // top-level params
-    if (/^p\d+$/.test(t)) { const v = params[t] ?? 0; pushValue(v, fmt(v)); return idx+1; }
+    if (/^p\d+$/.test(t)) { const v = params[t] ?? 0; pushValue(v); return idx+1; }
 
     // results recall
     if (/^r(\d+)?(,\d+)?$/.test(t)) {
@@ -140,22 +152,47 @@ function evaluateRPN(src, options = {}) {
       const si=m[2]?parseInt(m[2].slice(1),10):null;
       const res=results[ri-1];
       if (!res) throw new Error(`r: kein gespeichertes Ergebnis r${ri}`);
-      if (si==null){ res.forEach(v=> pushValue(v, fmt(v)) ); }
-      else { if (res[si-1]==null) throw new Error(`r: kein Wert an Position ${si}`); pushValue(res[si-1], fmt(res[si-1])); }
+      if (si==null){ res.forEach(v=> pushValue(v) ); }
+      else { if (res[si-1]==null) throw new Error(`r: kein Wert an Position ${si}`); pushValue(res[si-1]); }
       return idx+1;
     }
 
     // persistent vars
     if (/^s\d+$/.test(t))  { const n=parseInt(t.slice(1),10); const val=pop(); vars[n] = toNum(val); return idx+1; }
-    if (/^l\d+$/.test(t))  { const n=parseInt(t.slice(1),10); const val = vars[n] ?? 0; pushValue(val, fmt(val)); return idx+1; }
+    if (/^l\d+$/.test(t))  { const n=parseInt(t.slice(1),10); const val = vars[n] ?? 0; pushValue(val); return idx+1; }
 
     // temp regs (session)
     if (/^sp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const valTop = stack.length?stack[stack.length-1]:0; regs[n]=toNum(valTop); return idx+1; }
-    if (/^lp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const val = regs[n] ?? 0; pushValue(val, fmt(val)); return idx+1; }
+    if (/^lp\d+$/.test(t)) { const n=parseInt(t.slice(2),10); const val = regs[n] ?? 0; pushValue(val); return idx+1; }
 
     // SimVars
-    if (t.startsWith('(A:') && t.endsWith(')')) { const key=t.slice(3,-1).trim(); const val=simvars[key]??0; pushValue(val, fmt(val)); return idx+1; }
+    if (t.startsWith('(A:') && t.endsWith(')')) { const key=t.slice(3,-1).trim(); const val=simvars[key]??0; pushValue(val); return idx+1; }
     if (t.startsWith('(>A:') && t.endsWith(')')){ const key=t.slice(4,-1).trim(); const val=pop(); simvars[key]=toNum(val); simvarsDirty=true; return idx+1; }
+
+    // Conditionals if{ ... } [else{ ... }]
+    if (t === 'if{') {
+      const endIf = findBlockEnd(toks, idx);
+      let hasElse = false, elseStart = -1, endElse = -1;
+      if (toks[endIf + 1] === 'else{') { hasElse = true; elseStart = endIf + 1; endElse = findBlockEnd(toks, elseStart); }
+      const cond = pop();
+      if (truthy(cond)) {
+        const body = toks.slice(idx + 1, endIf);
+        runTokens(body);
+        return (hasElse ? endElse + 1 : endIf + 1);
+      } else {
+        if (hasElse) {
+          const elseBody = toks.slice(elseStart + 1, endElse);
+          runTokens(elseBody);
+          return endElse + 1;
+        } else {
+          return endIf + 1;
+        }
+      }
+    }
+    if (t === 'else{') {
+      const endElse = findBlockEnd(toks, idx);
+      return endElse + 1;
+    }
 
     // custom function as operator
     const func = fnMap.get(t);
@@ -163,51 +200,49 @@ function evaluateRPN(src, options = {}) {
       if (stack.length < func.params) throw new Error(`function '${func.name}' benötigt ${func.params} Parameter`);
       const ps = Array(func.params);
       for (let k = func.params-1; k >= 0; k--) ps[k] = stack.pop();
-      const bodyToks = tokenize(func.rpn).map(tok => /^p(\d+)$/.test(tok) ? fmt(ps[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
+      const bodyToks = tokenize(func.rpn).map(tok => /^p(\d+)$/.test(tok) ? String(ps[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
       const subExpr = bodyToks.join(' ');
       const sub = evaluateRPN(subExpr, { vars, simvars, functions, results });
-      expandedTokens.push(t); // keep function token for step-view
       sub.stack.forEach(v => stack.push(v));
       return idx+1;
     }
 
     // operators
     switch (t) {
-      case '+': { const [a,b]=pop2(); pushValue(toNum(a)+toNum(b)); expandedTokens.push('+'); break; }
-      case '-': { const [a,b]=pop2(); pushValue(toNum(a)-toNum(b)); expandedTokens.push('-'); break; }
-      case '*': { const [a,b]=pop2(); pushValue(toNum(a)*toNum(b)); expandedTokens.push('*'); break; }
-      case '/': { const [a,b]=pop2(); pushValue(toNum(a)/toNum(b)); expandedTokens.push('/'); break; }
-      case '%': { const [a,b]=pop2(); pushValue(toNum(a)%toNum(b));  expandedTokens.push('%'); break; }
-      case '^': { const [a,b]=pop2(); pushValue(Math.pow(toNum(a),toNum(b))); expandedTokens.push('^'); break; }
+      case '+': { const [a,b]=pop2(); pushValue(toNum(a)+toNum(b)); break; }
+      case '-': { const [a,b]=pop2(); pushValue(toNum(a)-toNum(b)); break; }
+      case '*': { const [a,b]=pop2(); pushValue(toNum(a)*toNum(b)); break; }
+      case '/': { const [a,b]=pop2(); pushValue(toNum(a)/toNum(b)); break; }
+      case '%': { const [a,b]=pop2(); pushValue(toNum(a)%toNum(b));  break; }
+      case '^': { const [a,b]=pop2(); pushValue(Math.pow(toNum(a),toNum(b))); break; }
 
-      case '>':  { const [a,b]=pop2(); pushValue(toNum(a)> toNum(b)?1:0);  expandedTokens.push('>');  break; }
-      case '<':  { const [a,b]=pop2(); pushValue(toNum(a)< toNum(b)?1:0);  expandedTokens.push('<');  break; }
-      case '>=': { const [a,b]=pop2(); pushValue(toNum(a)>=toNum(b)?1:0); expandedTokens.push('>='); break; }
-      case '<=': { const [a,b]=pop2(); pushValue(toNum(a)<=toNum(b)?1:0); expandedTokens.push('<='); break; }
-      case '==': { const [a,b]=pop2(); pushValue(toNum(a)===toNum(b)?1:0); expandedTokens.push('=='); break; }
-      case '!=': { const [a,b]=pop2(); pushValue(toNum(a)!==toNum(b)?1:0); expandedTokens.push('!='); break; }
+      case '>':  { const [a,b]=pop2(); pushValue(toNum(a)> toNum(b)?1:0);  break; }
+      case '<':  { const [a,b]=pop2(); pushValue(toNum(a)< toNum(b)?1:0);  break; }
+      case '>=': { const [a,b]=pop2(); pushValue(toNum(a)>=toNum(b)?1:0); break; }
+      case '<=': { const [a,b]=pop2(); pushValue(toNum(a)<=toNum(b)?1:0); break; }
+      case '==': { const [a,b]=pop2(); pushValue(toNum(a)===toNum(b)?1:0); break; }
+      case '!=': { const [a,b]=pop2(); pushValue(toNum(a)!==toNum(b)?1:0); break; }
 
-      case 'and': { const [a,b]=pop2(); pushValue(truthy(a)&&truthy(b)?1:0); expandedTokens.push('and'); break; }
-      case 'or':  { const [a,b]=pop2(); pushValue(truthy(a)||truthy(b)?1:0);  expandedTokens.push('or');  break; }
-      case 'not': { const a=pop();     pushValue(truthy(a)?0:1);              expandedTokens.push('not'); break; }
+      case 'and': { const [a,b]=pop2(); pushValue(truthy(a)&&truthy(b)?1:0); break; }
+      case 'or':  { const [a,b]=pop2(); pushValue(truthy(a)||truthy(b)?1:0);  break; }
+      case 'not': { const a=pop();     pushValue(truthy(a)?0:1);              break; }
 
-      case 'round':{ const a=pop(); pushValue(Math.round(toNum(a))); expandedTokens.push('round'); break; }
-      case 'floor':{ const a=pop(); pushValue(Math.floor(toNum(a))); expandedTokens.push('floor'); break; }
-      case 'ceil': { const a=pop(); pushValue(Math.ceil(toNum(a)));  expandedTokens.push('ceil');  break; }
-      case 'abs':  { const a=pop(); pushValue(Math.abs(toNum(a)));   expandedTokens.push('abs');   break; }
-      case 'sqrt': { const a=pop(); pushValue(Math.sqrt(toNum(a)));  expandedTokens.push('sqrt');  break; }
-      case 'sin':  { const a=pop(); pushValue(Math.sin(toNum(a)));   expandedTokens.push('sin');   break; }
-      case 'cos':  { const a=pop(); pushValue(Math.cos(toNum(a)));   expandedTokens.push('cos');   break; }
-      case 'tan':  { const a=pop(); pushValue(Math.tan(toNum(a)));   expandedTokens.push('tan');   break; }
-      case 'log':  { const a=pop(); pushValue(Math.log(toNum(a)));   expandedTokens.push('log');   break; }
-      case 'exp':  { const a=pop(); pushValue(Math.exp(toNum(a)));   expandedTokens.push('exp');   break; }
-      case 'min':  { const [a,b]=pop2(); pushValue(Math.min(toNum(a),toNum(b))); expandedTokens.push('min'); break; }
-      case 'max':  { const [a,b]=pop2(); pushValue(Math.max(toNum(a),toNum(b))); expandedTokens.push('max'); break; }
+      case 'round':{ const a=pop(); pushValue(Math.round(toNum(a))); break; }
+      case 'floor':{ const a=pop(); pushValue(Math.floor(toNum(a))); break; }
+      case 'ceil': { const a=pop(); pushValue(Math.ceil(toNum(a)));  break; }
+      case 'abs':  { const a=pop(); pushValue(Math.abs(toNum(a)));   break; }
+      case 'sqrt': { const a=pop(); pushValue(Math.sqrt(toNum(a)));  break; }
+      case 'sin':  { const a=pop(); pushValue(Math.sin(toNum(a)));   break; }
+      case 'cos':  { const a=pop(); pushValue(Math.cos(toNum(a)));   break; }
+      case 'tan':  { const a=pop(); pushValue(Math.tan(toNum(a)));   break; }
+      case 'log':  { const a=pop(); pushValue(Math.log(toNum(a)));   break; }
+      case 'exp':  { const a=pop(); pushValue(Math.exp(toNum(a)));   break; }
+      case 'min':  { const [a,b]=pop2(); pushValue(Math.min(toNum(a),toNum(b))); break; }
+      case 'max':  { const [a,b]=pop2(); pushValue(Math.max(toNum(a),toNum(b))); break; }
       case 'clamp':{ const minVal=pop(), maxVal=pop(), val=pop();
-                     pushValue(Math.max(toNum(minVal), Math.min(toNum(maxVal), toNum(val))));
-                     expandedTokens.push('clamp'); break; }
+                     pushValue(Math.max(toNum(minVal), Math.min(toNum(maxVal), toNum(val)))); break; }
 
-      case 'dnor':{ const a=pop(); const x=toNum(a); pushValue(((x % 360) + 360) % 360); expandedTokens.push('dnor'); break; }
+      case 'dnor':{ const a=pop(); const x=toNum(a); pushValue(((x % 360) + 360) % 360); break; }
 
       case 'Boolean': case 'Number': case ',': return idx + 1;
 
@@ -217,12 +252,12 @@ function evaluateRPN(src, options = {}) {
   }
 
   runTokens(tokens);
-  return { stack, regs, vars, simvars, expandedTokens, simvarsDirty, functions };
+  return { stack, regs, vars, simvars, originalTokens: expandedTokens, simvarsDirty, functions };
 }
 
-/* ---------- step-by-step (inline highlight of reducible segment) ---------- */
-function stepVerbose(expandedTokens, context = {}){
-  let toks = expandedTokens.slice();
+/* ---------- step-by-step (inline highlight, incl. conditionals) ---------- */
+function stepVerbose(tokensInput, context = {}){
+  let toks = tokensInput.slice();
   const vars = context.vars || Array(10).fill(0);
   const regs = context.regs || Array(10).fill(0);
   const simvars = context.simvars || {};
@@ -233,7 +268,9 @@ function stepVerbose(expandedTokens, context = {}){
   const marker = !!context.marker;
   const endStep = !!context.endStep;
 
-  if (noColor) applyNoColor();
+  if (noColor) {
+    ANSI.reset = ANSI.red = ANSI.yellow = ANSI.markOn = ANSI.markOff = '';
+  }
 
   const isNum = (t)=>/^[-+]?\d+(?:[.,]\d+)?$/.test(String(t));
 
@@ -257,6 +294,7 @@ function stepVerbose(expandedTokens, context = {}){
     if (UN_OPS.has(op)) return 1;
     if (BIN_OPS.has(op)) return 2;
     if (op === 'clamp') return 3;
+    if (op === 'if{') return 1; // conditional pops 1 value
     const f = fnMap.get(op);
     if (f) return f.params;
     return 0;
@@ -324,7 +362,6 @@ function stepVerbose(expandedTokens, context = {}){
     return out;
   }
 
-  // full postfix once (plain)
   console.log(toks.join(' '));
 
   let step = 1;
@@ -344,7 +381,26 @@ function stepVerbose(expandedTokens, context = {}){
         segStack.push({start:i,end:i,val:tokenValue(t),text:String(t)});
         continue;
       }
-      const k = arity(t); if (k===0) continue;
+      let k = arity(t);
+      if (k===0) continue;
+
+      // special preview for if{ to compute the block range
+      if (t === 'if{') {
+        if (segStack.length < 1) continue;
+        // find block end and optional else
+        const endIf = findBlockEnd(toks, i);
+        let hasElse = false, elseStart = -1, endElse = -1;
+        if (toks[endIf + 1] === 'else{') { hasElse = true; elseStart = endIf + 1; endElse = findBlockEnd(toks, elseStart); }
+        const args = segStack.splice(segStack.length-1, 1);
+        argsForLog = args;
+        numsForApply = args.map(a=>a.val);
+        highlightStart = args[0].start;
+        highlightEnd = hasElse ? endElse : endIf; // include entire branch structure
+        opIndex = i;
+        chosenOp = t;
+        break;
+      }
+
       if (segStack.length >= k){
         const args = segStack.splice(segStack.length-k, k);
         argsForLog = args;
@@ -358,39 +414,77 @@ function stepVerbose(expandedTokens, context = {}){
     }
 
     if (highlightStart === -1){
-      // nothing reducible
       break;
     }
 
-    // Step header with inline highlight
     const styleMid = marker ? 'M' : 'Y';
     console.log(`Schritt ${step}: ${highlightRange(toks, highlightStart, highlightEnd, styleMid)}`);
 
-    // compute result
-    let res;
-    const f = fnMap.get(chosenOp);
-    if (f){
-      const subToks = tokenize(f.rpn).map(tok => /^p(\d+)$/.test(tok) ? String(numsForApply[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
-      const subExpr = subToks.join(' ');
-      const sub = evaluateRPN(subExpr, { vars: vars.slice(), simvars: {...simvars}, functions: Array.from(fnMap.values()), results: [] });
-      res = sub.stack.length ? sub.stack[sub.stack.length-1] : 0;
+    // compute result / branch
+    let newToks;
+    if (chosenOp === 'if{') {
+      const endIf = findBlockEnd(toks, opIndex);
+      let hasElse = false, elseStart = -1, endElse = -1;
+      if (toks[endIf + 1] === 'else{') { hasElse = true; elseStart = endIf + 1; endElse = findBlockEnd(toks, elseStart); }
+      const cond = numsForApply[0] || 0;
+      const takeIf = cond !== 0;
+      const ifBody = toks.slice(opIndex + 1, endIf);
+      const elseBody = hasElse ? toks.slice(elseStart + 1, endElse) : [];
+      const body = takeIf ? ifBody : elseBody;
+      // evaluate body
+      const sub = evaluateRPN(body.join(' '), { vars: vars.slice(), simvars: {...simvars}, functions: Array.from(fnMap.values()), results: [] });
+      const outVals = sub.stack.map(v => String(Number.isFinite(v) && Math.abs(v - Math.round(v))<1e-12 ? Math.round(v) : v));
+      const which = takeIf ? 'IF' : (hasElse ? 'ELSE' : 'NONE');
+
+      // Build semantic preview line:
+      // cond if{ visibleIf } else{ visibleElse } -> Zweig: WHICH -> outputs
+      const visibleIf = takeIf ? ifBody.join(' ') : '...';
+      const visibleElse = hasElse ? (takeIf ? '...' : elseBody.join(' ')) : null;
+      const preview = `${argsForLog[0].text} if{ ${visibleIf} }${hasElse ? ` else{ ${visibleElse} }` : ''} → Zweig: ${which} → ${outVals.join(' ')}`;
+      console.log(`${noColor ? '' : ANSI.yellow}${preview}${noColor ? '' : ANSI.reset}`);
+
+      // replace [cond, if{...} [else{...}]] with outVals
+      newToks = [];
+      newToks.push(...toks.slice(0, highlightStart));
+      newToks.push(...outVals);
+      newToks.push(...toks.slice(highlightEnd + 1));
+      toks = newToks;
+
+      if (endStep) {
+        const insertIdx = highlightStart + Math.max(outVals.length - 1, 0);
+        const style = marker ? 'M' : 'Y';
+        if (outVals.length) {
+          console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, insertIdx, style)}`);
+        } else {
+          console.log(`Schritt ${step} Ende: ${toks.join(' ')}`);
+        }
+      }
     } else {
-      res = apply(chosenOp, numsForApply);
-    }
-    const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
-    console.log(`${noColor ? '' : ANSI.yellow}${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}${noColor ? '' : ANSI.reset}`);
+      // normal operator or function
+      let res;
+      const f = fnMap.get(chosenOp);
+      if (f){
+        const subToks = tokenize(f.rpn).map(tok => /^p(\d+)$/.test(tok) ? String(numsForApply[parseInt(tok.slice(1),10)-1] ?? 0) : tok);
+        const subExpr = subToks.join(' ');
+        const sub = evaluateRPN(subExpr, { vars: vars.slice(), simvars: {...simvars}, functions: Array.from(fnMap.values()), results: [] });
+        res = sub.stack.length ? sub.stack[sub.stack.length-1] : 0;
+      } else {
+        res = apply(chosenOp, numsForApply);
+      }
+      const resStr = String(Number.isFinite(res) && Math.abs(res - Math.round(res))<1e-12 ? Math.round(res) : res);
+      console.log(`${noColor ? '' : ANSI.yellow}${argsForLog.map(a=>a.text).join(' ')} ${chosenOp} = ${resStr}${noColor ? '' : ANSI.reset}`);
 
-    // replace args...op with result
-    const newToks=[];
-    newToks.push(...toks.slice(0, highlightStart));
-    newToks.push(resStr);
-    newToks.push(...toks.slice(opIndex+1));
-    toks = newToks;
+      newToks=[];
+      newToks.push(...toks.slice(0, highlightStart));
+      newToks.push(resStr);
+      newToks.push(...toks.slice(opIndex+1));
+      toks = newToks;
 
-    if (endStep) {
-      const resultIndex = highlightStart; // where we inserted res
-      const style = marker ? 'M' : 'Y';
-      console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
+      if (endStep) {
+        const resultIndex = highlightStart;
+        const style = marker ? 'M' : 'Y';
+        console.log(`Schritt ${step} Ende: ${highlightSingleToken(toks, resultIndex, style)}`);
+      }
     }
 
     step++;
@@ -485,6 +579,8 @@ Options:
 
 Examples:
   node rpn.js "1 2 3 4 + + +" --endstep
+  node rpn.js "1 if{ 2 + }"
+  node rpn.js "0 if{ 2 + } else{ 5 + }"
   node rpn.js --print
   node rpn.js --reset
 `);
@@ -508,7 +604,7 @@ Examples:
         evalExpr = pre.join(' ');
       }
 
-      const { stack, regs, vars: outVars, simvars: outSimvars, expandedTokens, simvarsDirty, functions: outFunctions } =
+      const { stack, regs, vars: outVars, simvars: outSimvars, originalTokens, simvarsDirty, functions: outFunctions } =
         evaluateRPN(evalExpr, { vars, params: finalParams, simvars: runtimeSimvars, functions, results: resultsHistory });
 
       // Persist
@@ -521,9 +617,9 @@ Examples:
         saveResults(stackPath, newHistory);
       }
 
-      const doStepEffective = (endStep || doStep);
+      const doStepEffective = (endStep || (argv.includes('--step') || argv.includes('-s')));
       if (doStepEffective) {
-        stepVerbose(expandedTokens, { vars: outVars, regs, simvars: outSimvars, functions: outFunctions, noColor, marker, endStep });
+        stepVerbose(originalTokens, { vars: outVars, regs, simvars: outSimvars, functions: outFunctions, noColor, marker, endStep });
       } else {
         console.log(stack.join(' '));
       }
