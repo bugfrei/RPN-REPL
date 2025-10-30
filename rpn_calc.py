@@ -3,7 +3,9 @@
 # Unified Python RPN Calculator + REPL
 # Features: persistent s0..s9, session sp0..lp0, SimVars with prefixes (A legacy compat),
 # functions with params pN, precompile, step (with optional infix + endstep + mark + nocolor),
-# result history r1..r8 (and rX,Y), conditionals if{ } else{ }, input mode, readline history + tab completion.
+# result history r1..r8 (and rX,Y), conditionals if{ } else{ }, input mode,
+# readline history + tab completion, parameter prompting (labels in CLI & REPL by default),
+# :noprompt toggle in REPL to hide labels.
 
 import os, sys, json, re, math, subprocess, atexit
 from pathlib import Path
@@ -68,11 +70,9 @@ def load_simvars() -> dict:
   o = load_json(SIM_PATH, {"simvars": {}})
   src = o.get("simvars", {})
   out = {}
-  # copy nested dicts (prefix spaces)
   for k,v in src.items():
     if isinstance(v, dict):
       out[k] = dict(v)
-  # legacy scalars -> A:
   for k,v in src.items():
     if not isinstance(v, dict):
       out.setdefault("A", {})[k] = v
@@ -98,7 +98,7 @@ def load_results() -> list:
 def save_results(results: list):
   save_json(STACK_PATH, {"results": results[:8]})
 
-# ----------- Tokenizer -----------
+# ----------- Tokenizer & param helpers -----------
 def tokenize(src: str):
   tokens = []
   i = 0
@@ -144,6 +144,25 @@ def to_num(v):
 def is_pure_r_token_expression(src: str) -> bool:
   toks = tokenize(src or "")
   return len(toks) == 1 and re.fullmatch(r"r(\d+)?(,\d+)?", toks[0]) is not None
+
+def collect_missing_params(tokens, existing_params):
+  needed = sorted({t for t in tokens if re.fullmatch(r"p\d+", t)}, key=lambda x:int(x[1:]))
+  missing = [t for t in needed if t not in existing_params]
+  return missing
+
+def prompt_params(missing, *, silent=False):
+  params = {}
+  for name in missing:
+    try:
+      val_str = input("" if silent else f"Parameter {name}: ")
+    except EOFError:
+      val_str = "0"
+    try:
+      val = float(val_str.replace(",", ".")) if val_str.strip() != "" else 0.0
+    except Exception:
+      val = 0.0
+    params[name] = val
+  return params
 
 # ----------- Block matching -----------
 def find_block_end(toks, open_index):
@@ -206,7 +225,6 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
     c = stack.pop(); b = stack.pop(); a = stack.pop(); return a,b,c
 
   def get_sim(prefix, key):
-    # compat: if prefix A lacks, check legacy simvars[key] number
     if prefix == "A":
       if prefix in simvars and key in simvars[prefix]:
         return simvars[prefix][key]
@@ -223,15 +241,13 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
   i = 0
   while i < len(tokens):
     t = tokens[i]
-    # numbers (including leading negatives)
     if is_number_token(t):
       push(parse_number(t)); i += 1; continue
 
-    # params pN
+    # params pN (no prompting here; must be injected before evaluate_rpn)
     if re.fullmatch(r"p\d+", t):
       push(to_num(params.get(t, 0))); i += 1; continue
 
-    # r recall
     m = re.fullmatch(r"r(\d+)?(,\d+)?", t)
     if m:
       ri = int(m.group(1)) if m.group(1) else 1
@@ -247,7 +263,6 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
         push(res[si-1])
       i += 1; continue
 
-    # persistent sN / load lN
     if re.fullmatch(r"s\d+", t):
       n = int(t[1:])
       val = pop()
@@ -258,7 +273,6 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
       push(to_num(vars_state[n] if n < len(vars_state) else 0))
       i += 1; continue
 
-    # session spN / lpN
     if re.fullmatch(r"sp\d+", t):
       n = int(t[2:])
       val = stack[-1] if stack else 0
@@ -269,7 +283,6 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
       push(to_num(regs[n] if n < len(regs) else 0))
       i += 1; continue
 
-    # SimVars
     m2 = SIM_RE.fullmatch(t)
     if m2:
       write = m2.group(1) == ">"
@@ -282,7 +295,6 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
         push(get_sim(prefix, key))
       i += 1; continue
 
-    # Conditionals
     if t == "if{":
       end_if = find_block_end(tokens, i)
       has_else = False; else_start = -1; end_else = -1
@@ -305,8 +317,8 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
       end_else = find_block_end(tokens, i)
       i = end_else + 1; continue
 
-    # Custom function acts like operator (pop params, substitute pN, eval recursively)
-    f = func_map.get(t)
+    f_map = {f["name"]: f for f in functions}
+    f = f_map.get(t)
     if f:
       k = int(f["params"])
       if len(stack) < k: raise RuntimeError(f"function '{f['name']}' benötigt {k} Parameter")
@@ -326,7 +338,6 @@ def evaluate_rpn(src: str, *, vars_state=None, params=None, simvars=None, functi
         push(v)
       i += 1; continue
 
-    # Operators
     def binop(fn):
       a,b = pop2(); push(fn(to_num(a), to_num(b)))
     def unop(fn):
@@ -395,6 +406,8 @@ def fmt_num(v):
     return str(f)
   except: return str(v)
 
+SIM_RE = re.compile(r"^\((>?)([A-Za-z]+):(.*)\)$")
+
 def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False, marker=False, endstep=False, infix=False):
   if no_color: apply_no_color()
 
@@ -448,7 +461,6 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
 
   def apply_op(op, arr):
     if op in BIN_OPS or op in UN_OPS or op == "clamp" or op == "dnor":
-      # reuse Python evaluator quickly
       tmp_src = " ".join([fmt_num(v) for v in arr] + [op])
       sub = evaluate_rpn(tmp_src, vars_state=vars_state[:], params={}, simvars=json.loads(json.dumps(simvars)), functions=functions, results_history=[])
       return sub["stack"][-1] if sub["stack"] else 0.0
@@ -460,12 +472,10 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
   while True:
     seg = []
     highlight_a = -1; highlight_b = -1; op_idx = -1; args = []; num_args = []; chosen = None
-    # find next reducible
     for i,t in enumerate(toks):
       if token_is_value(t):
         seg.append({"start":i,"end":i,"val":token_value(t),"text":t})
         continue
-      # if block needs 1 arg before it
       if t == "if{":
         if len(seg) < 1: continue
         end_if = find_block_end(toks, i)
@@ -481,9 +491,9 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
           num_args = [args[0]["val"]]
           highlight_a = args[0]["start"]; highlight_b = end_if
           op_idx = i; chosen = t; break
-      # functions
-      if t in func_map:
-        k = func_map[t]["params"]
+      f_map = {f["name"]: f for f in functions}
+      if t in f_map:
+        k = f_map[t]["params"]
         if len(seg) >= k:
           args = seg[-k:]
           num_args = [a["val"] for a in args]
@@ -491,7 +501,6 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
           op_idx = i; chosen = t; break
         else:
           continue
-      # generic ops
       k = 1 if t in UN_OPS else (2 if t in BIN_OPS else (3 if t=="clamp" else 0))
       if k and len(seg) >= k:
         args = seg[-k:]
@@ -504,7 +513,6 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
     style_mid = "M" if marker else "Y"
     print(f"Schritt {step}: {highlight_range(toks, highlight_a, highlight_b, style_mid)}")
 
-    # perform reduction
     if chosen == "if{":
       end_if = find_block_end(toks, op_idx)
       has_else = (end_if + 1 < len(toks) and toks[end_if+1] == "else{")
@@ -514,16 +522,13 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
       take_if = (cond != 0)
       if_body = toks[op_idx+1:end_if]
       else_body = toks[end_if+2:end_else] if has_else else []
-      chosen_body = if_body if take_if else else_body
-      # run body to value(s)
-      sub = evaluate_rpn(" ".join(chosen_body), vars_state=vars_state[:], params={}, simvars=json.loads(json.dumps(simvars)), functions=functions, results_history=[])
+      sub = evaluate_rpn(" ".join(if_body if take_if else else_body), vars_state=vars_state[:], params={}, simvars=json.loads(json.dumps(simvars)), functions=functions, results_history=[])
       out_vals = [fmt_num(v) for v in sub["stack"]]
       which = "IF" if take_if else ("ELSE" if has_else else "NONE")
-      vis_if = " ".join(if_body) if take_if else "..."
-      vis_else = " ".join(else_body) if (has_else and not take_if) else ("..." if has_else else None)
+      vis_if = "..." if not take_if else " ".join(if_body)
+      vis_else = "..." if take_if else (" ".join(else_body) if has_else else None)
       preview = f"{args[0]['text']} if{{ {vis_if} }}"
-      if has_else:
-        preview += f" else{{ {vis_else} }}"
+      if has_else: preview += f" else{{ {vis_else} }}"
       preview += f" → Zweig: {which} → {' '.join(out_vals) if out_vals else ''}"
       print(ANSI["yellow"] + preview + ANSI["reset"])
       new_toks = toks[:highlight_a] + out_vals + toks[highlight_b+1:]
@@ -536,8 +541,9 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
         else:
           print(f"Schritt {step} Ende: {' '.join(toks)}")
     else:
-      if chosen in func_map:
-        f = func_map[chosen]
+      f_map = {f["name"]: f for f in functions}
+      if chosen in f_map:
+        f = f_map[chosen]
         sub_toks = []
         for tok in tokenize(f["rpn"]):
           m = re.fullmatch(r"p(\d+)", tok)
@@ -556,13 +562,13 @@ def step_verbose(tokens, *, vars_state, regs, simvars, functions, no_color=False
           style = "M" if marker else "Y"
           print(f"Schritt {step} Ende: {highlight_single(toks, highlight_a, style)}")
       else:
-        res = apply_op(chosen, num_args)
-        if infix and len(num_args)==2 and chosen in BIN_OPS:
-          left = args[0]["text"]; right = args[1]["text"]
-          print(ANSI["yellow"] + f"{left} {chosen} {right} = {fmt_num(res)}" + ANSI["reset"])
-        elif infix and len(num_args)==1 and chosen in UN_OPS:
-          a = args[0]["text"]
-          print(ANSI["yellow"] + f"{chosen} {a} = {fmt_num(res)}" + ANSI["reset"])
+        tmp_src = " ".join([fmt_num(v) for v in num_args] + [chosen])
+        sub = evaluate_rpn(tmp_src, vars_state=vars_state[:], params={}, simvars=json.loads(json.dumps(simvars)), functions=functions, results_history=[])
+        res = sub["stack"][-1] if sub["stack"] else 0.0
+        if infix and len(num_args)==2:
+          print(ANSI["yellow"] + f"{args[0]['text']} {chosen} {args[1]['text']} = {fmt_num(res)}" + ANSI["reset"])
+        elif infix and len(num_args)==1:
+          print(ANSI["yellow"] + f"{chosen} {args[0]['text']} = {fmt_num(res)}" + ANSI["reset"])
         else:
           left_txt = " ".join([a["text"] for a in args])
           print(ANSI["yellow"] + f"{left_txt} {chosen} = {fmt_num(res)}" + ANSI["reset"])
@@ -581,7 +587,7 @@ def clear_screen():
   os.system("cls" if os.name == "nt" else "clear")
 
 def print_usage():
-  print("""Usage:
+  print(f"""Usage:
   python rpn_calc.py "<expr>" [options]
   python rpn_calc.py  # startet REPL
 
@@ -592,18 +598,18 @@ Options:
   --precompile, -p   Funktionsnamen vorab durch deren Körper (ohne pN) ersetzen
   --nocolor, -c/-n   Farben aus
   --mark, -m         Markieren mit gelbem Hintergrund
-  --noprompt         Unterdrückt Param-Prompts (Eingabe dennoch erforderlich)
+  --noprompt         Unterdrückt Param-Prompt-Labels (Eingabe bleibt erforderlich)
   --ctx JSON         Inline-Kontext (params, simvars)
   --print            Persistente Variablen ausgeben (ohne <expr>)
   --reset            Persistente Variablen zurücksetzen (ohne <expr>)
   --help, -?         Hilfe
 
 Persistenz-Dateien:
-  State:  {STATE}
-  SimVars:{SIM}
-  Funcs:  {FUNC}
-  Result: {STACK}
-""".format(STATE=STATE_PATH, SIM=SIM_PATH, FUNC=FUNC_PATH, STACK=STACK_PATH))
+  State:  {STATE_PATH}
+  SimVars:{SIM_PATH}
+  Funcs:  {FUNC_PATH}
+  Result: {STACK_PATH}
+""")
 
 # REPL globals (session toggles)
 step_mode = False
@@ -615,6 +621,8 @@ infix_mode = False
 input_mode = False
 input_prompt = False
 input_buffer = []
+# REPL prompts for params with labels by default; can be toggled silent with :noprompt
+repl_param_silent = False
 last_postfix = ""
 
 # readline
@@ -633,26 +641,20 @@ def setup_readline():
       _readline.read_history_file(str(HIST_PATH))
     except Exception:
       pass
-    # TAB completion
     def completer(text, state):
       buffer = _readline.get_line_buffer()
-      items = []
-      # commands
       commands = [":e",":fe",":s",":l",":r",":rl",":f",":?",
                   ":step",":p",":color",":mark",":end",":infix",
-                  ":si",":sp",":spi",":sip",":i",":ip",":q",":="]
-      # operators, registers, functions, simvars
+                  ":si",":sp",":spi",":sip",":i",":ip",":noprompt",":q",":="]
       ops = ["+","-","*","/","%","^","and","or","not","&&","||","!",
              ">","<",">=","<=","==","=","!=","<>",
              "round","floor","ceil","abs","sin","cos","tan","log","exp",
              "min","max","clamp","pow2","pow","sqrt2","sqrt","dnor",
              "if{","else{","}"]
       regs = []
-      for i in range(10):
-        regs += [f"s{i}",f"l{i}",f"sp{i}",f"lp{i}"]
+      for i in range(10): regs += [f"s{i}",f"l{i}",f"sp{i}",f"lp{i}"]
       regs += [f"p{i}" for i in range(1,10)] + [f"r{i}" for i in range(1,9)]
       funcs = [f["name"] for f in load_funcs()]
-      # simvars suggestions
       sim = load_json(SIM_PATH, {"simvars": {}}).get("simvars", {})
       sv = set()
       prefixes = {k for k,v in sim.items() if isinstance(v, dict)}
@@ -668,7 +670,6 @@ def setup_readline():
       if buffer.strip().startswith(":"):
         cand = [c for c in commands if c.startswith(buffer.strip())]
       else:
-        # approximate: complete last token
         parts = buffer.split()
         prefix = parts[-1] if parts else ""
         cand = [c for c in pool if c.startswith(prefix)]
@@ -724,12 +725,13 @@ def print_help():
   print("  :spi/:sip - Step+Precompile+Infix EIN (wenn AUS) / Step AUS (wenn AN)")
   print("  :i        - Eingabe-Modus (tokenweise) umschalten")
   print("  :ip       - Im Eingabe-Modus Postfix-Puffer über jeder Eingabe anzeigen umschalten")
+  print("  :noprompt - Parametereingabe ohne Labels (nur REPL) umschalten")
   print("  :q        - Beenden")
   print("")
   print("Eingaben ohne ':' werden als Postfix direkt ausgewertet. Leere Eingabe zeigt diese Hilfe.")
 
 def call_calc(expr=None, admin=None):
-  global step_mode, precompile_mode, no_color, marker, endstep_mode, infix_mode
+  global step_mode, precompile_mode, no_color, marker, endstep_mode, infix_mode, repl_param_silent
   if admin == "--reset":
     save_state_vars([0]*10)
     print("Variablen s0..s9 zurückgesetzt.")
@@ -745,10 +747,14 @@ def call_calc(expr=None, admin=None):
   functions = load_funcs()
   results = load_results()
 
-  params = {}  # no prompt inside REPL
+  params = {}
 
   try:
     eval_expr = expr or ""
+    missing = collect_missing_params(tokenize(eval_expr), params)
+    if missing:
+      params.update(prompt_params(missing, silent=repl_param_silent))
+
     if precompile_mode:
       eval_expr = " ".join(precompile_tokens(tokenize(eval_expr), functions))
 
@@ -776,7 +782,7 @@ def call_calc(expr=None, admin=None):
 
 def repl():
   global step_mode, precompile_mode, no_color, marker, endstep_mode, infix_mode
-  global input_mode, input_prompt, input_buffer, last_postfix
+  global input_mode, input_prompt, input_buffer, last_postfix, repl_param_silent
 
   print_help()
   while True:
@@ -840,6 +846,7 @@ def repl():
         else: step_mode=False; print("Step: AUS")
       elif cmd == ":i": input_mode = not input_mode; input_buffer=[]; print(f"Eingabe-Modus (tokenweise): {'AN' if input_mode else 'AUS'}")
       elif cmd == ":ip": input_prompt = not input_prompt; print(f"Input-Prompt-Anzeige: {'AN' if input_prompt else 'AUS'}")
+      elif cmd == ":noprompt": repl_param_silent = not repl_param_silent; print(f"REPL Param-Prompts ohne Label: {'AN' if repl_param_silent else 'AUS'}")
       else:
         print_help()
       continue
@@ -850,13 +857,11 @@ def repl():
 def main():
   args = sys.argv[1:]
   if not args:
-    # REPL
     setup_readline()
     atexit.register(save_history_truncated)
     repl()
     return
 
-  # options parse
   do_help = ("--help" in args) or ("-?" in args)
   do_step = ("--step" in args) or ("-s" in args)
   do_pre = ("--precompile" in args) or ("-p" in args)
@@ -877,7 +882,6 @@ def main():
     print("State-Datei:", STATE_PATH)
     return
 
-  # expression if first arg not option
   has_expr = len(args)>0 and not args[0].startswith("-")
   expr = args[0] if has_expr else ""
 
@@ -885,7 +889,6 @@ def main():
     print_usage()
     if not has_expr: return
 
-  # ctx JSON
   inline_ctx = {}
   if "--ctx" in args:
     i = args.index("--ctx")
@@ -896,16 +899,13 @@ def main():
         print("Error: --ctx ist kein gültiges JSON:", e)
         return
 
-  # params from ctx, but Python REPL/CLI has no interactive pN prompt here (unless you add)
   vars_state = load_state_vars()
   simvars = load_simvars()
   functions = load_funcs()
   results = load_results()
 
   params = inline_ctx.get("params", {})
-  # merge simvars from ctx
   ctx_sim = inline_ctx.get("simvars", {})
-  # deep merge
   merged_sim = json.loads(json.dumps(simvars))
   for pref, data in ctx_sim.items():
     if isinstance(data, dict):
@@ -913,6 +913,10 @@ def main():
 
   try:
     ev_expr = expr
+    # prompt for missing pN first (labels unless --noprompt given)
+    missing_cli = collect_missing_params(tokenize(ev_expr), params)
+    if missing_cli:
+      params.update(prompt_params(missing_cli, silent=no_prompt))
     if do_pre:
       ev_expr = " ".join(precompile_tokens(tokenize(ev_expr), functions))
     result = evaluate_rpn(ev_expr, vars_state=vars_state, params=params, simvars=merged_sim, functions=functions, results_history=results)
